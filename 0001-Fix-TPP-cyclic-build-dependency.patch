@@ -1,0 +1,40 @@
+From 2de6fbb4782da437217547c1c68808c6555ddf94 Mon Sep 17 00:00:00 2001
+From: Niranjan Hasabnis <niranjan.hasabnis@intel.com>
+Date: Tue, 22 Nov 2022 15:35:40 -0800
+Subject: [PATCH] Fix TPP cyclic build dependency
+
+NOTE: This is required to build IREE with TPP and needs to be applied on top of
+Oct 10 commit (hash: a0bb6a518b2a82b77cb7f076afaa0382757a80f9) from Lorenzo.
+---
+ lib/Standalone/CMakeLists.txt                              | 2 +-
+ lib/Standalone/Dialect/LinalgX/TransformOps/CMakeLists.txt | 1 +
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/lib/Standalone/CMakeLists.txt b/lib/Standalone/CMakeLists.txt
+index d0c1746..d0bd3f7 100644
+--- a/lib/Standalone/CMakeLists.txt
++++ b/lib/Standalone/CMakeLists.txt
+@@ -34,7 +34,7 @@ add_mlir_library(TPPStandalone
+ 
+   DEPENDS
+     TPPCompilerPassIncGen
+-    TPPLinalgXTransformOps
++    #TPPLinalgXTransformOps
+ 
+ 	LINK_LIBS PUBLIC
+     TPPLinalgXDialect
+diff --git a/lib/Standalone/Dialect/LinalgX/TransformOps/CMakeLists.txt b/lib/Standalone/Dialect/LinalgX/TransformOps/CMakeLists.txt
+index 7b704f6..78e2886 100644
+--- a/lib/Standalone/Dialect/LinalgX/TransformOps/CMakeLists.txt
++++ b/lib/Standalone/Dialect/LinalgX/TransformOps/CMakeLists.txt
+@@ -9,6 +9,7 @@ add_mlir_dialect_library(TPPLinalgXTransformOps
+ 
+   LINK_LIBS PUBLIC
+     TPPLinalgXDialect
++    TPPStandalone
+ )
+ 
+ target_include_directories(TPPLinalgXTransformOps
+-- 
+2.34.1
+
