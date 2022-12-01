@@ -1179,11 +1179,72 @@ void TensorStoreOp::getCanonicalizationPatterns(RewritePatternSet &results,
 // stream.async.alloca
 //===----------------------------------------------------------------------===//
 
+namespace {
+
+// Sinks transient alloca-like ops down to their consumers to avoid cases where
+// we allocate and then keep that live/copy-on-write it when not required.
+template <typename Op>
+struct SinkAllocaLikeOpToConsumers : public OpRewritePattern<Op> {
+  using OpRewritePattern<Op>::OpRewritePattern;
+  LogicalResult matchAndRewrite(Op producerOp,
+                                PatternRewriter &rewriter) const override {
+    auto users = llvm::to_vector<4>(producerOp->getUsers());
+    if (users.size() == 0) return failure();
+
+    // If we have a single user then we can sink right to it.
+    if (users.size() == 1) {
+      return sinkOp(producerOp, users.front());
+    }
+
+    // If we only have users in the same block then we can safely move to the
+    // first (as no change to cross-block SSA dominance can happen).
+    if (!producerOp.getResult().isUsedOutsideOfBlock(producerOp->getBlock())) {
+      Operation *targetOp = nullptr;
+      for (auto user : users) {
+        if (!targetOp || user->isBeforeInBlock(targetOp)) {
+          targetOp = user;
+        }
+      }
+      assert(targetOp);
+      return sinkOp(producerOp, targetOp);
+    }
+
+    // Redundant computation here, but only in cases where we have multiple
+    // users that may live outside the block the op is in.
+    DominanceInfo domInfo(producerOp->getParentOp());
+
+    // Find the common dominator block across all uses. This may be the
+    // entry block itself.
+    Block *commonDominator = users.front()->getBlock();
+    for (auto user : users) {
+      commonDominator =
+          domInfo.findNearestCommonDominator(commonDominator, user->getBlock());
+    }
+
+    // Find the first use within the dominator block (if any) so that we
+    // can sink down to it.
+    Operation *firstUserInDominator = commonDominator->getTerminator();
+    for (auto user : users) {
+      if (user->getBlock() == commonDominator) {
+        if (user->isBeforeInBlock(firstUserInDominator)) {
+          firstUserInDominator = user;
+        }
+      }
+    }
+
+    // Sink to the common dominator - which may not even use the op but will
+    // at least prevent us from doing extra work.
+    return sinkOp(producerOp, firstUserInDominator);
+  }
+};
+
+}  // namespace
+
 void AsyncAllocaOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                                 MLIRContext *context) {
   // TODO(benvanik): alloca (staging) -> non-staging change to target.
   // TODO(benvanik): alloca (non-staging) -> staging change to target.
-  // TODO(benvanik): sink to first user.
+  results.insert<SinkAllocaLikeOpToConsumers<AsyncAllocaOp>>(context);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1224,66 +1285,6 @@ void AsyncConstantOp::getCanonicalizationPatterns(RewritePatternSet &results,
 // stream.async.splat
 //===----------------------------------------------------------------------===//
 
-namespace {
-
-// Sinks splat ops down to its consumers to avoid cases where we splat and then
-// keep that live/copy-on-write it.
-struct SinkSplatsToConsumers : public OpRewritePattern<AsyncSplatOp> {
-  using OpRewritePattern::OpRewritePattern;
-  LogicalResult matchAndRewrite(AsyncSplatOp splatOp,
-                                PatternRewriter &rewriter) const override {
-    auto users = llvm::to_vector<4>(splatOp->getUsers());
-    if (users.size() == 0) return failure();
-
-    // If we have a single user then we can sink right to it.
-    if (users.size() == 1) {
-      return sinkOp(splatOp, users.front());
-    }
-
-    // If we only have users in the same block then we can safely move to the
-    // first (as no change to cross-block SSA dominance can happen).
-    if (!splatOp.getResult().isUsedOutsideOfBlock(splatOp->getBlock())) {
-      Operation *targetOp = nullptr;
-      for (auto user : users) {
-        if (!targetOp || user->isBeforeInBlock(targetOp)) {
-          targetOp = user;
-        }
-      }
-      assert(targetOp);
-      return sinkOp(splatOp, targetOp);
-    }
-
-    // Redundant computation here, but only in cases where we have multiple
-    // users that may live outside the block the op is in.
-    DominanceInfo domInfo(splatOp->getParentOp());
-
-    // Find the common dominator block across all uses. This may be the
-    // entry block itself.
-    Block *commonDominator = users.front()->getBlock();
-    for (auto user : users) {
-      commonDominator =
-          domInfo.findNearestCommonDominator(commonDominator, user->getBlock());
-    }
-
-    // Find the first use within the dominator block (if any) so that we
-    // can sink down to it.
-    Operation *firstUserInDominator = commonDominator->getTerminator();
-    for (auto user : users) {
-      if (user->getBlock() == commonDominator) {
-        if (user->isBeforeInBlock(firstUserInDominator)) {
-          firstUserInDominator = user;
-        }
-      }
-    }
-
-    // Sink to the common dominator - which may not even use the op but will
-    // at least prevent us from doing extra work.
-    return sinkOp(splatOp, firstUserInDominator);
-  }
-};
-
-}  // namespace
-
 void AsyncSplatOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                                MLIRContext *context) {
   // TODO(#6972): find splat+update-from and turn into fill.
@@ -1291,7 +1292,7 @@ void AsyncSplatOp::getCanonicalizationPatterns(RewritePatternSet &results,
   // TODO(#6972): find splat+update-into and turn into alloca+fill+update.
   // TODO(#6972): find splat+copy-into and turn into alloca+fill+copy.
   // TODO(#6972): clone instead of sinking to common dominator.
-  results.insert<SinkSplatsToConsumers>(context);
+  results.insert<SinkAllocaLikeOpToConsumers<AsyncSplatOp>>(context);
   results.insert<ElideUnusedOp<AsyncSplatOp>>(context);
 }
 
@@ -2180,10 +2181,10 @@ namespace {
 
 // Elides a region-carrying op when the region is empty.
 // Requires no results that need replacement.
-template <typename OpT>
-struct ElideEmptyCmdRegionOp : public OpRewritePattern<OpT> {
-  using OpRewritePattern<OpT>::OpRewritePattern;
-  LogicalResult matchAndRewrite(OpT op,
+template <typename Op>
+struct ElideEmptyCmdRegionOp : public OpRewritePattern<Op> {
+  using OpRewritePattern<Op>::OpRewritePattern;
+  LogicalResult matchAndRewrite(Op op,
                                 PatternRewriter &rewriter) const override {
     auto &entryBlock = op.getBody().front();
     auto yieldOp = getYieldIfOnlyOp(entryBlock);
@@ -2341,6 +2342,75 @@ void TimepointJoinOp::getCanonicalizationPatterns(RewritePatternSet &results,
 }
 
 //===----------------------------------------------------------------------===//
+// stream.timepoint.barrier
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+// Walks up the tied op SSA def chain to find a stream.timepoint.await op that
+// produces the resource. Returns nullptr if no await op is found or local
+// analysis cannot determine the source (spans across a branch, etc).
+static std::pair<IREE::Stream::TimepointAwaitOp, Value> findSourceAwaitOp(
+    Value resource) {
+  Value baseResource = resource;
+  while (auto definingOp = dyn_cast_or_null<IREE::Util::TiedOpInterface>(
+             baseResource.getDefiningOp())) {
+    if (auto awaitOp = dyn_cast<IREE::Stream::TimepointAwaitOp>(
+            baseResource.getDefiningOp())) {
+      return {awaitOp, baseResource};
+    }
+    auto tiedValue = definingOp.getTiedResultOperand(baseResource);
+    if (!tiedValue) break;
+    baseResource = tiedValue;
+  }
+  return {nullptr, nullptr};
+}
+
+// Tries to find awaits that feed into signals and then chains execution by
+// propagating the original timepoint forward.
+//
+// Example:
+//  %r0a = stream.timepoint.await %t0 => %source
+//  %r0b, %t1 = stream.timepoint.barrier %r0a
+// ->
+//  %r0b = %source
+//  %t1 = %t0
+struct ChainTimepoints : public OpRewritePattern<TimepointBarrierOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(TimepointBarrierOp barrierOp,
+                                PatternRewriter &rewriter) const override {
+    // Try to find an await op. This may traverse through any number of tied ops
+    // along the way.
+    auto [awaitOp, baseResource] = findSourceAwaitOp(barrierOp.getResource());
+    if (!awaitOp) return failure();
+
+    // TODO(benvanik): move this to a pass that can do IPO. Local analysis is
+    // insufficient for this. For now we conservatively ignore any case where
+    // the await does not feed directly into the signal.
+    if (baseResource != barrierOp.getResource()) {
+      return rewriter.notifyMatchFailure(
+          barrierOp, "ops exist between await and signal, not yet matching");
+    }
+
+    // Rewrite such that consumers of the signal op wait on the prior
+    // timepoint.
+    rewriter.replaceOp(barrierOp,
+                       {
+                           awaitOp.getTiedResultOperand(baseResource),
+                           awaitOp.getAwaitTimepoint(),
+                       });
+    return success();
+  }
+};
+
+}  // namespace
+
+void TimepointBarrierOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                                     MLIRContext *context) {
+  results.insert<ChainTimepoints>(context);
+}
+
+//===----------------------------------------------------------------------===//
 // stream.timepoint.await
 //===----------------------------------------------------------------------===//
 
@@ -2461,6 +2531,16 @@ struct SinkSubviewsAcrossAwaits : public OpRewritePattern<TimepointAwaitOp> {
   }
 };
 
+// Returns true if all operands of |op| are defined before |insertionPoint| in
+// the containing block.
+static bool areAllOperandsDefinedBy(Operation *op, Operation *insertionPoint,
+                                    DominanceInfo &dominanceInfo) {
+  for (auto operand : op->getOperands()) {
+    if (!dominanceInfo.dominates(operand, insertionPoint)) return false;
+  }
+  return true;
+}
+
 // Finds timepoint awaits on the same timepoint within the same domination
 // paths and groups them together.
 //
@@ -2478,17 +2558,14 @@ struct GroupAwaitsByTimepoint : public OpRewritePattern<TimepointAwaitOp> {
   using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(TimepointAwaitOp op,
                                 PatternRewriter &rewriter) const override {
+    DominanceInfo dominanceInfo(op->getParentOp());
     SmallVector<TimepointAwaitOp> coveredOps;
     for (auto &use : op.getAwaitTimepoint().getUses()) {
       // TODO(benvanik): make this handle joins/ties; today we get blocked
       // there. We rely on other canonicalizers to sink things such that
       // (hopefully) we get them directly accessible here.
       if (use.getOwner() == op) continue;
-      if (use.getOwner()->getBlock() != op->getBlock() ||
-          use.getOwner()->isBeforeInBlock(op)) {
-        // TODO(benvanik): allow dominated blocks.
-        continue;
-      }
+      if (dominanceInfo.dominates(use.getOwner(), op)) continue;
       auto awaitOp = dyn_cast<TimepointAwaitOp>(use.getOwner());
       if (!awaitOp ||
           !AffinityAttr::areCompatible(
@@ -2497,6 +2574,11 @@ struct GroupAwaitsByTimepoint : public OpRewritePattern<TimepointAwaitOp> {
         // Can't combine if the affinities differ as the wait semantics are
         // load-bearing. Probably. They really shouldn't be.
         // TODO(benvanik): remove affinity from stream.timepoint.await.
+        continue;
+      }
+      // Ensure all dependencies of the await op are available.
+      if (!areAllOperandsDefinedBy(awaitOp, op, dominanceInfo)) {
+        // One or more operands is defined after op so we can't merge.
         continue;
       }
       coveredOps.push_back(awaitOp);

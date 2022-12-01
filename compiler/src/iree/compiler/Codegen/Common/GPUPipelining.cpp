@@ -12,8 +12,8 @@
 #include "mlir/Dialect/NVGPU/IR/NVGPUDialect.h"
 #include "mlir/Dialect/SCF/Transforms/Transforms.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include "mlir/Transforms/SideEffectUtils.h"
 
 //====---------------------------------------------------------------------===//
 // Pass to pipeline copy to shared memory for matmul op.
@@ -38,7 +38,7 @@ static Operation* replaceOpWithPredicatedOp(Operation* op, Value pred,
   // speculatively.
   if (!isa<nvgpu::DeviceAsyncCopyOp>(op)) {
     // Return/execute the op if it is a side effect free.
-    if (mlir::isSideEffectFree(op)) return op;
+    if (mlir::isMemoryEffectFree(op)) return op;
     // Return/execute the op if it is barrier, commit group, or ldmatrix op.
     if (isa<gpu::BarrierOp, nvgpu::DeviceAsyncCreateGroupOp, nvgpu::LdMatrixOp>(
             op))

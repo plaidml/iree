@@ -36,8 +36,7 @@ static constexpr int64_t kMaxVectorSize = 4096;
 
 static void populateVectorizationPatterns(RewritePatternSet &patterns) {
   MLIRContext *ctx = patterns.getContext();
-  linalg::LinalgVectorizationOptions opt;
-  linalg::LinalgTransformationFilter f(
+  IREE::LinalgExt::LinalgTransformationFilter f(
       {StringAttr::get(ctx, getWorkgroupKTiledMarker()),
        StringAttr::get(ctx, getVectorizeMarker())},
       llvm::None);
@@ -49,8 +48,8 @@ static void populateVectorizationPatterns(RewritePatternSet &patterns) {
     auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
     if (!linalgOp) return success();
     int64_t maxFlatVecSize = 1;
-    for (OpOperand *operand : linalgOp.getInputAndOutputOperands()) {
-      auto type = operand->get().getType().dyn_cast<ShapedType>();
+    for (OpOperand &operand : linalgOp->getOpOperands()) {
+      auto type = operand.get().getType().dyn_cast<ShapedType>();
       if (!type) continue;
       if (!type.hasStaticShape()) return failure();
       maxFlatVecSize = std::max(maxFlatVecSize, type.getNumElements());
@@ -59,10 +58,10 @@ static void populateVectorizationPatterns(RewritePatternSet &patterns) {
   });
   VectorizationPatterns<linalg::FillOp, linalg::GenericOp,
                         linalg::Conv1DNwcWcfOp,
-                        linalg::Conv1DNcwFcwOp>::insert(patterns, opt, f);
+                        linalg::Conv1DNcwFcwOp>::insert(patterns, f);
   patterns.add<linalg::CopyVectorizationPattern>(ctx);
   patterns.add<LinalgVectorizationPattern>(
-      ctx, f.addOpFilter<linalg::ContractionOpInterface>(), opt);
+      ctx, f.addOpFilter<linalg::ContractionOpInterface>());
 }
 
 namespace {
@@ -80,7 +79,7 @@ struct GPUVectorizationPass
 
     // Pre-process convolution ops.
     RewritePatternSet decompositionPattern(funcOp.getContext());
-    linalg::LinalgTransformationFilter f(
+    IREE::LinalgExt::LinalgTransformationFilter f(
         {StringAttr::get(context, getWorkgroupKTiledMarker())},
         StringAttr::get(context, getVectorizeMarker()));
     f.setMatchByDefault();
@@ -106,6 +105,8 @@ struct GPUVectorizationPass
             funcOp, std::move(vectorizationPatterns)))) {
       return signalPassFailure();
     }
+
+    linalg::hoistRedundantVectorTransfersOnTensor(funcOp);
   }
 };
 }  // namespace

@@ -10,8 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "iree/base/api.h"
 #include "iree/base/internal/span.h"
-#include "iree/base/status_cc.h"
 #include "iree/hal/api.h"
 #include "iree/tooling/vm_util.h"
 #include "iree/vm/api.h"
@@ -46,7 +46,8 @@ inline Status PrintVariantList(iree_vm_list_t* variant_list,
 // Prints a variant list to stdout.
 inline Status PrintVariantList(iree_vm_list_t* variant_list,
                                size_t max_element_count = 1024) {
-  return iree_print_variant_list(variant_list, max_element_count, stdout);
+  return iree_tooling_variant_list_fprint(variant_list, max_element_count,
+                                          stdout);
 }
 
 }  // namespace iree

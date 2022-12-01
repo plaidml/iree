@@ -63,13 +63,13 @@
 #include "benchmark/benchmark.h"
 #include "iree/base/api.h"
 #include "iree/base/internal/flags.h"
-#include "iree/base/status_cc.h"
 #include "iree/base/tracing.h"
 #include "iree/hal/api.h"
+#include "iree/modules/hal/types.h"
 #include "iree/tooling/context_util.h"
+#include "iree/tooling/device_util.h"
 #include "iree/tooling/vm_util_cc.h"
 #include "iree/vm/api.h"
-#include "iree/vm/ref_cc.h"
 
 constexpr char kNanosecondsUnitString[] = "ns";
 constexpr char kMicrosecondsUnitString[] = "us";
@@ -77,10 +77,12 @@ constexpr char kMillisecondsUnitString[] = "ms";
 
 // TODO(hanchung): Extract the batch size using
 // iree_vm_function_lookup_attr_by_name.
-IREE_FLAG(
-    int32_t, batch_size, 1,
-    "The number of batch size, which is expected to match "
-    "iree-hal-benchmark-dispatch-repeat-count when translating the module");
+IREE_FLAG(int32_t, batch_size, 1,
+          "Number of invocations per iteration, which for dispatch benchmarks "
+          "must match the --iree-hal-benchmark-dispatch-repeat-count value "
+          "used during compilation.");
+IREE_FLAG(int32_t, batch_concurrency, 1,
+          "Number of invocations within a batch that should run concurrently.");
 
 IREE_FLAG(string, entry_function, "",
           "Name of a function contained in the module specified by module_file "
@@ -178,7 +180,8 @@ namespace iree {
 namespace {
 
 static void BenchmarkGenericFunction(const std::string& benchmark_name,
-                                     int batch_size, iree_vm_context_t* context,
+                                     int32_t batch_size,
+                                     iree_vm_context_t* context,
                                      iree_vm_function_t function,
                                      iree_vm_list_t* inputs,
                                      benchmark::State& state) {
@@ -206,14 +209,162 @@ void RegisterGenericBenchmark(const std::string& function_name,
                               iree_vm_function_t function,
                               iree_vm_list_t* inputs) {
   auto benchmark_name = "BM_" + function_name;
-  int batch_size = FLAG_batch_size;
+  int32_t batch_size = FLAG_batch_size;
   benchmark::RegisterBenchmark(benchmark_name.c_str(),
-                               [benchmark_name, batch_size, context, function,
-                                inputs](benchmark::State& state) -> void {
+                               [=](benchmark::State& state) -> void {
                                  BenchmarkGenericFunction(
                                      benchmark_name, batch_size, context,
                                      function, inputs, state);
                                })
+      // By default only the main thread is included in CPU time. Include all
+      // the threads instead.
+      ->MeasureProcessCPUTime()
+      // To make single and multi-threaded benchmarks more comparable, use the
+      // wall time to determine how many iterations to run. See
+      // https://github.com/google/benchmark#cpu-timers,
+      ->UseRealTime()
+      ->Unit(FLAG_time_unit.first ? FLAG_time_unit.second
+                                  : benchmark::kMillisecond);
+}
+
+// Runs up to |batch_size| pipelined invocations in sequence along with
+// concurrency. Example:
+//   batch_size=1, concurrency=1:
+//     [invocation 0]
+//   batch_size=2, concurrency=1:
+//     [invocation 0] -> [invocation 1]
+//   batch_size=2, concurrency=2:
+//     [invocation 0]
+//     [invocation 1]
+//   batch_size=4, concurrency=2:
+//     [invocation 0] -> [invocation 2]
+//     [invocation 1] -> [invocation 3]
+static void BenchmarkAsyncFunction(
+    const std::string& benchmark_name, int32_t batch_size,
+    int32_t batch_concurrency, iree_hal_device_t* device,
+    iree_vm_context_t* context, iree_vm_function_t function,
+    iree_vm_list_t* common_inputs, benchmark::State& state) {
+  IREE_TRACE_SCOPE_DYNAMIC(benchmark_name.c_str());
+  IREE_TRACE_FRAME_MARK();
+  iree_allocator_t host_allocator = iree_allocator_system();
+
+  // Round up batch size to some multiple of concurrency.
+  batch_size = (int32_t)iree_host_align(batch_size, batch_concurrency);
+
+  // Benchmarking loop.
+  while (state.KeepRunningBatch(batch_size)) {
+    IREE_TRACE_SCOPE0("BenchmarkIteration");
+    IREE_TRACE_FRAME_MARK_NAMED("Iteration");
+
+    state.PauseTiming();
+
+    IREE_TRACE_ZONE_BEGIN_NAMED(z_begin, "PrepareBatch");
+
+    // Each concurrent track of execution gets its own semaphore.
+    std::vector<vm::ref<iree_hal_semaphore_t>> timeline_semaphores;
+    for (int32_t i = 0; i < batch_concurrency; ++i) {
+      vm::ref<iree_hal_semaphore_t> timeline_semaphore;
+      IREE_CHECK_OK(
+          iree_hal_semaphore_create(device, 0ull, &timeline_semaphore));
+      timeline_semaphores.push_back(std::move(timeline_semaphore));
+    }
+
+    // Preallocate fences and I/O for each invocation.
+    // The same inputs are used for each but we need a unique list to hold the
+    // unique fences. Each fence represents when the invocation has completed.
+    std::vector<vm::ref<iree_hal_fence_t>> invocation_fences;
+    std::vector<vm::ref<iree_vm_list_t>> invocation_inputs;
+    std::vector<vm::ref<iree_vm_list_t>> invocation_outputs;
+    vm::ref<iree_hal_fence_t> completion_fence;
+    IREE_CHECK_OK(iree_hal_fence_create(batch_concurrency, host_allocator,
+                                        &completion_fence));
+    for (int32_t i = 0; i < batch_size / batch_concurrency; ++i) {
+      for (int32_t j = 0; j < batch_concurrency; ++j) {
+        // Chain each concurrent minibatch to the previous. Note that to start
+        // we wait on nothing and begin executing immediately.
+        vm::ref<iree_hal_fence_t> wait_fence;
+        if (i > 0) {
+          wait_fence = vm::retain_ref(
+              invocation_fences[(i - 1) * batch_concurrency + j]);
+        }
+        uint64_t signal_value = i + 1;
+        vm::ref<iree_hal_fence_t> signal_fence;
+        IREE_CHECK_OK(iree_hal_fence_create_at(timeline_semaphores[j].get(),
+                                               signal_value, host_allocator,
+                                               &signal_fence));
+        invocation_fences.push_back(vm::retain_ref(signal_fence));
+
+        // Join the final minibatch on the completion fence.
+        if (i == batch_size / batch_concurrency - 1) {
+          IREE_CHECK_OK(iree_hal_fence_insert(completion_fence.get(),
+                                              timeline_semaphores[j].get(),
+                                              signal_value));
+        }
+
+        // Clone common inputs and add the invocation-specific fences.
+        vm::ref<iree_vm_list_t> inputs;
+        IREE_CHECK_OK(
+            iree_vm_list_clone(common_inputs, host_allocator, &inputs));
+        IREE_CHECK_OK(iree_vm_list_push_ref_move(inputs.get(), wait_fence));
+        IREE_CHECK_OK(iree_vm_list_push_ref_move(inputs.get(), signal_fence));
+        invocation_inputs.push_back(std::move(inputs));
+
+        // Setup empty outputs.
+        vm::ref<iree_vm_list_t> outputs;
+        IREE_CHECK_OK(iree_vm_list_create(/*element_type=*/nullptr, 16,
+                                          host_allocator, &outputs));
+        invocation_outputs.push_back(std::move(outputs));
+      }
+    }
+
+    IREE_TRACE_ZONE_END(z_begin);
+
+    state.ResumeTiming();
+    {
+      // TODO(benvanik): replace with async invocations. Today if the invocation
+      // performs any waits this will block on the initial invoke instead of
+      // actually overlapping things.
+      for (int32_t i = 0; i < batch_size; ++i) {
+        IREE_CHECK_OK(
+            iree_vm_invoke(context, function, IREE_VM_INVOCATION_FLAG_NONE,
+                           /*policy=*/nullptr, invocation_inputs[i].get(),
+                           invocation_outputs[i].get(), host_allocator));
+      }
+      IREE_CHECK_OK(
+          iree_hal_fence_wait(completion_fence.get(), iree_infinite_timeout()));
+    }
+    state.PauseTiming();
+
+    IREE_TRACE_ZONE_BEGIN_NAMED(z_end, "CleanupBatch");
+    for (int32_t i = 0; i < batch_size; ++i) {
+      iree_vm_list_clear(invocation_outputs[i].get());
+    }
+    invocation_fences.clear();
+    invocation_inputs.clear();
+    invocation_outputs.clear();
+    completion_fence.reset();
+    timeline_semaphores.clear();
+    IREE_TRACE_ZONE_END(z_end);
+
+    state.ResumeTiming();
+  }
+  state.SetItemsProcessed(state.iterations());
+}
+
+void RegisterAsyncBenchmark(const std::string& function_name,
+                            iree_hal_device_t* device,
+                            iree_vm_context_t* context,
+                            iree_vm_function_t function,
+                            iree_vm_list_t* inputs) {
+  auto benchmark_name = "BM_" + function_name;
+  int32_t batch_size = FLAG_batch_size;
+  int32_t batch_concurrency = FLAG_batch_concurrency;
+  benchmark::RegisterBenchmark(
+      benchmark_name.c_str(),
+      [=](benchmark::State& state) -> void {
+        BenchmarkAsyncFunction(benchmark_name, batch_size, batch_concurrency,
+                               device, context, function, inputs, state);
+      })
       // By default only the main thread is included in CPU time. Include all
       // the threads instead.
       ->MeasureProcessCPUTime()
@@ -286,18 +437,20 @@ class IREEBenchmark {
 
     // Order matters. Tear down modules first to release resources.
     inputs_.reset();
-    iree_vm_context_release(context_);
-    iree_vm_module_release(main_module_);
-    iree_vm_instance_release(instance_);
+    context_.reset();
+    main_module_.reset();
+    instance_.reset();
 
     // Tear down device last in order to get accurate statistics.
     if (device_allocator_ && FLAG_print_statistics) {
-      IREE_IGNORE_ERROR(
-          iree_hal_allocator_statistics_fprint(stderr, device_allocator_));
+      IREE_IGNORE_ERROR(iree_hal_allocator_statistics_fprint(
+          stderr, device_allocator_.get()));
     }
-    iree_hal_allocator_release(device_allocator_);
-    iree_hal_device_release(device_);
+    device_allocator_.reset();
+    device_.reset();
   };
+
+  iree_hal_device_t* device() const { return device_.get(); }
 
   iree_status_t Register() {
     IREE_TRACE_SCOPE0("IREEBenchmark::Register");
@@ -325,10 +478,11 @@ class IREEBenchmark {
         iree_tooling_create_instance(host_allocator, &instance_));
 
     IREE_RETURN_IF_ERROR(iree_tooling_load_module_from_flags(
-        instance_, host_allocator, &main_module_));
+        instance_.get(), host_allocator, &main_module_));
 
     IREE_RETURN_IF_ERROR(iree_tooling_create_context_from_flags(
-        instance_, /*user_module_count=*/1, /*user_modules=*/&main_module_,
+        instance_.get(), /*user_module_count=*/1,
+        /*user_modules=*/&main_module_,
         /*default_device_uri=*/iree_string_view_empty(), host_allocator,
         &context_, &device_, &device_allocator_));
 
@@ -341,27 +495,38 @@ class IREEBenchmark {
 
     iree_vm_function_t function;
     IREE_RETURN_IF_ERROR(iree_vm_module_lookup_function_by_name(
-        main_module_, IREE_VM_FUNCTION_LINKAGE_EXPORT,
+        main_module_.get(), IREE_VM_FUNCTION_LINKAGE_EXPORT,
         iree_string_view_t{function_name.data(), function_name.size()},
         &function));
 
     IREE_CHECK_OK(ParseToVariantList(
-        device_allocator_,
+        device_allocator_.get(),
         iree::span<const std::string>{FLAG_function_inputs.data(),
                                       FLAG_function_inputs.size()},
-        iree_vm_instance_allocator(instance_), &inputs_));
-    RegisterGenericBenchmark(function_name, context_, function, inputs_.get());
+        iree_vm_instance_allocator(instance_.get()), &inputs_));
+
+    iree_string_view_t invocation_model = iree_vm_function_lookup_attr_by_name(
+        &function, IREE_SV("iree.abi.model"));
+    if (iree_string_view_equal(invocation_model, IREE_SV("coarse-fences"))) {
+      // Asynchronous invocation.
+      iree::RegisterAsyncBenchmark(function_name, device_.get(), context_.get(),
+                                   function, inputs_.get());
+    } else {
+      // Synchronous invocation.
+      iree::RegisterGenericBenchmark(function_name, context_.get(), function,
+                                     inputs_.get());
+    }
     return iree_ok_status();
   }
 
   iree_status_t RegisterAllExportedFunctions() {
     IREE_TRACE_SCOPE0("IREEBenchmark::RegisterAllExportedFunctions");
     iree_vm_module_signature_t signature =
-        iree_vm_module_signature(main_module_);
+        iree_vm_module_signature(main_module_.get());
     for (iree_host_size_t i = 0; i < signature.export_function_count; ++i) {
       iree_vm_function_t function;
       IREE_RETURN_IF_ERROR(iree_vm_module_lookup_function_by_ordinal(
-          main_module_, IREE_VM_FUNCTION_LINKAGE_EXPORT, i, &function));
+          main_module_.get(), IREE_VM_FUNCTION_LINKAGE_EXPORT, i, &function));
       iree_string_view_t function_name = iree_vm_function_name(&function);
 
       // We run anything with the 'benchmark' attribute.
@@ -370,11 +535,11 @@ class IREEBenchmark {
           &function, IREE_SV("iree.benchmark"));
       if (iree_string_view_equal(benchmark_type, IREE_SV("dispatch"))) {
         iree::RegisterDispatchBenchmark(
-            std::string(function_name.data, function_name.size), context_,
+            std::string(function_name.data, function_name.size), context_.get(),
             function);
       } else if (iree_string_view_equal(benchmark_type, IREE_SV("entry"))) {
         iree::RegisterGenericBenchmark(
-            std::string(function_name.data, function_name.size), context_,
+            std::string(function_name.data, function_name.size), context_.get(),
             function,
             /*inputs=*/nullptr);
       } else {
@@ -387,32 +552,47 @@ class IREEBenchmark {
           continue;
         }
 
+        // Query function information to determine how to run it.
         iree_vm_function_signature_t signature =
             iree_vm_function_signature(&function);
         iree_host_size_t argument_count = 0;
         iree_host_size_t result_count = 0;
         IREE_RETURN_IF_ERROR(iree_vm_function_call_count_arguments_and_results(
             &signature, &argument_count, &result_count));
-        if (argument_count) {
-          // Only functions with no inputs are run (because we can't pass
-          // anything).
-          continue;
+        iree_string_view_t invocation_model =
+            iree_vm_function_lookup_attr_by_name(&function,
+                                                 IREE_SV("iree.abi.model"));
+        if (iree_string_view_equal(invocation_model,
+                                   IREE_SV("coarse-fences"))) {
+          // Asynchronous invocation with coarse fences. Expect just those.
+          if (argument_count == 2) {
+            // Only functions taking a (wait, signal) fence pair are run.
+            iree::RegisterAsyncBenchmark(
+                std::string(function_name.data, function_name.size),
+                device_.get(), context_.get(), function,
+                /*inputs=*/nullptr);
+          }
+        } else {
+          // Basic synchronous invocation.
+          if (argument_count == 0) {
+            // Only functions with no inputs are run (because we can't pass
+            // anything).
+            iree::RegisterGenericBenchmark(
+                std::string(function_name.data, function_name.size),
+                context_.get(), function,
+                /*inputs=*/nullptr);
+          }
         }
-
-        iree::RegisterGenericBenchmark(
-            std::string(function_name.data, function_name.size), context_,
-            function,
-            /*inputs=*/nullptr);
       }
     }
     return iree_ok_status();
   }
 
-  iree_vm_instance_t* instance_ = nullptr;
-  iree_vm_context_t* context_ = nullptr;
-  iree_hal_device_t* device_ = nullptr;
-  iree_hal_allocator_t* device_allocator_ = nullptr;
-  iree_vm_module_t* main_module_ = nullptr;
+  iree::vm::ref<iree_vm_instance_t> instance_;
+  iree::vm::ref<iree_vm_context_t> context_;
+  iree::vm::ref<iree_hal_device_t> device_;
+  iree::vm::ref<iree_hal_allocator_t> device_allocator_;
+  iree::vm::ref<iree_vm_module_t> main_module_;
   iree::vm::ref<iree_vm_list_t> inputs_;
 };
 }  // namespace
@@ -434,6 +614,8 @@ int main(int argc, char** argv) {
     printf("%s\n", iree::Status(std::move(status)).ToString().c_str());
     return ret;
   }
+  IREE_CHECK_OK(iree_hal_begin_profiling_from_flags(iree_benchmark.device()));
   ::benchmark::RunSpecifiedBenchmarks();
+  IREE_CHECK_OK(iree_hal_end_profiling_from_flags(iree_benchmark.device()));
   return 0;
 }

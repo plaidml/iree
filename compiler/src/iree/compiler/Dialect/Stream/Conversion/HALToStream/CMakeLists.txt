@@ -14,13 +14,14 @@ iree_cc_library(
   NAME
     HALToStream
   HDRS
-    "ConvertHALToStream.h"
+    "Patterns.h"
   SRCS
-    "ConvertHALToStream.cpp"
+    "Patterns.cpp"
   DEPS
     MLIRArithDialect
     MLIRFuncDialect
     MLIRIR
+    MLIRTransforms
     iree::compiler::Dialect::HAL::IR
     iree::compiler::Dialect::Stream::Conversion
     iree::compiler::Dialect::Stream::IR

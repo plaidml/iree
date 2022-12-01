@@ -1,4 +1,4 @@
-// RUN: iree-opt --split-input-file --pass-pipeline='hal.executable(hal.executable.variant(builtin.module(func.func(iree-spirv-tile-and-distribute))))' %s | FileCheck %s
+// RUN: iree-opt --split-input-file --pass-pipeline='builtin.module(hal.executable(hal.executable.variant(builtin.module(func.func(iree-spirv-tile-and-distribute)))))' %s | FileCheck %s
 
 #map0 = affine_map<()[s0] -> (s0 * 8)>
 #map1 = affine_map<()[s0, s1] -> (8, s1 - s0 * 8)>
@@ -9,7 +9,7 @@
 #map6 = affine_map<(d0, d1, d2) -> (d0, d1)>
 
 #config = #iree_codegen.lowering_config<tile_sizes = [[8, 16], [1, 1], [0, 0, 1]]>
-#translation = #iree_codegen.translation_info<SPIRVDistribute>
+#translation = #iree_codegen.translation_info<SPIRVBaseDistribute>
 #pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
   #hal.descriptor_set.layout<0, bindings = [
     #hal.descriptor_set.binding<0, storage_buffer>,
@@ -79,7 +79,7 @@ hal.executable private @matmul {
 // -----
 
 #config = #iree_codegen.lowering_config<tile_sizes = [[1, 4, 32], [1, 1, 1]]>
-#translation = #iree_codegen.translation_info<SPIRVDistribute>
+#translation = #iree_codegen.translation_info<SPIRVBaseDistribute>
 #pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
   #hal.descriptor_set.layout<0, bindings = [
     #hal.descriptor_set.binding<0, storage_buffer>,
@@ -159,7 +159,7 @@ hal.executable private @conv_1d {
 #map7 = affine_map<(d0)[s0] -> (32, -d0 + s0)>
 
 #config = #iree_codegen.lowering_config<tile_sizes = [[0, 1, 4, 32], [0, 1, 1, 1], [0, 0, 0, 0, 1, 1, 4]]>
-#translation = #iree_codegen.translation_info<SPIRVDistribute>
+#translation = #iree_codegen.translation_info<SPIRVBaseDistribute>
 #pipeline_layout = #hal.pipeline.layout<push_constants = 9, sets = [
   #hal.descriptor_set.layout<0, bindings = [
     #hal.descriptor_set.binding<0, storage_buffer>,
@@ -274,7 +274,7 @@ hal.executable private @conv_2d {
 // -----
 
 #config = #iree_codegen.lowering_config<tile_sizes = [[0, 0, 1, 4, 32], [0, 0, 1, 1, 1]]>
-#translation = #iree_codegen.translation_info<SPIRVDistribute>
+#translation = #iree_codegen.translation_info<SPIRVBaseDistribute>
 #pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
   #hal.descriptor_set.layout<0, bindings = [
     #hal.descriptor_set.binding<0, storage_buffer>,
@@ -344,7 +344,7 @@ hal.executable private @conv_3d {
 #map7 = affine_map<(d0, d1, d2, d3)[s0] -> (d0 * 1092 + s0 + d1 * 78 + d2 * 6 + d3)>
 
 #config = #iree_codegen.lowering_config<tile_sizes = [[1, 4, 32], [1, 1, 1]]>
-#translation = #iree_codegen.translation_info<SPIRVDistribute>
+#translation = #iree_codegen.translation_info<SPIRVBaseDistribute>
 #pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
   #hal.descriptor_set.layout<0, bindings = [
     #hal.descriptor_set.binding<0, storage_buffer>,
@@ -411,7 +411,7 @@ module  {
 // -----
 
 #config = #iree_codegen.lowering_config<tile_sizes = [[32], [1]]>
-#translation = #iree_codegen.translation_info<SPIRVDistribute>
+#translation = #iree_codegen.translation_info<SPIRVBaseDistribute>
 #pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
   #hal.descriptor_set.layout<0, bindings = [
     #hal.descriptor_set.binding<0, storage_buffer>,
@@ -442,7 +442,7 @@ hal.executable @matvec {
           %5 = affine.min affine_map<(d0) -> (-d0 + 250, 32)>(%arg0)
           %6 = memref.subview %0[%arg0, 0] [%5, 1024] [1, 1] : memref<250x1024xf32> to memref<?x1024xf32, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>>
           %7 = memref.subview %2[%arg0] [%5] [1] : memref<250xf32> to memref<?xf32, affine_map<(d0)[s0] -> (d0 + s0)>>
-          linalg.fill {lowering_config = #config}
+          linalg.fill
             ins(%cst : f32)
             outs(%7 : memref<?xf32, affine_map<(d0)[s0] -> (d0 + s0)>>)
           linalg.matvec {lowering_config = #config}

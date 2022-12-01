@@ -67,7 +67,7 @@ static void populateTilingCopyToWorkgroupMemPatterns(
         // distribution.
         SmallVector<Value, 4> tileSizesVal;
         MemRefType dstMemRefType = cast<linalg::GenericOp>(operation)
-                                       .getOutputOperand(0)
+                                       .getDpsInitOperand(0)
                                        ->get()
                                        .getType()
                                        .cast<MemRefType>();
@@ -101,7 +101,7 @@ static void populateTilingCopyToWorkgroupMemPatterns(
   patterns.insert<IREE::LinalgExt::LinalgTilingPattern>(
       linalg::GenericOp::getOperationName(), patterns.getContext(),
       tilingOptions,
-      linalg::LinalgTransformationFilter(
+      IREE::LinalgExt::LinalgTransformationFilter(
           {StringAttr::get(patterns.getContext(),
                            getCopyToWorkgroupMemoryMarker())},
           StringAttr::get(patterns.getContext(), getVectorizeMarker())));
@@ -112,7 +112,7 @@ static void populateTilingCopyToWorkgroupMemPatterns(
 static Optional<SmallVector<int64_t>> getTileToDistributableSize(
     linalg::GenericOp copyOp, int64_t flatWorkgroupSize) {
   SmallVector<int64_t, 4> shape = copyOp.getStaticLoopRanges();
-  unsigned bitWidth = copyOp.getOutputOperand(0)
+  unsigned bitWidth = copyOp.getDpsInitOperand(0)
                           ->get()
                           .getType()
                           .cast<MemRefType>()
@@ -160,7 +160,7 @@ static void populateTileToUnroll(RewritePatternSet &patterns,
   patterns.insert<IREE::LinalgExt::LinalgTilingPattern>(
       linalg::GenericOp::getOperationName(), patterns.getContext(),
       tilingOptions,
-      linalg::LinalgTransformationFilter(
+      IREE::LinalgExt::LinalgTransformationFilter(
           {StringAttr::get(patterns.getContext(),
                            getCopyToWorkgroupMemoryMarker())},
           StringAttr::get(patterns.getContext(), kCopyToDistribute)));
@@ -199,7 +199,7 @@ SmallVector<linalg::ProcInfo> getIds(OpBuilder &b, Location loc,
 /// Return the shape of copy op that can be vectorized to a
 /// transfer_read/transfer_write of size `targetVectorSize`.
 SmallVector<int64_t> getNativeDstShape(linalg::GenericOp copyOp) {
-  unsigned bitWidth = copyOp.getOutputOperand(0)
+  unsigned bitWidth = copyOp.getDpsInitOperand(0)
                           ->get()
                           .getType()
                           .cast<MemRefType>()
@@ -245,19 +245,18 @@ static void populateTilingAndDistribute(RewritePatternSet &patterns,
   patterns.insert<IREE::LinalgExt::LinalgTilingPattern>(
       linalg::GenericOp::getOperationName(), patterns.getContext(),
       tilingOptions,
-      linalg::LinalgTransformationFilter(
+      IREE::LinalgExt::LinalgTransformationFilter(
           {StringAttr::get(patterns.getContext(), kCopyToDistribute)},
           StringAttr::get(patterns.getContext(), kCopyDistributed)));
 }
 
 static void populateVectorizationPatterns(RewritePatternSet &patterns) {
   VectorizationPatterns<linalg::GenericOp>::insert(
-      patterns, linalg::LinalgVectorizationOptions(),
-      linalg::LinalgTransformationFilter(
-          {StringAttr::get(patterns.getContext(),
-                           getCopyToWorkgroupMemoryMarker()),
-           StringAttr::get(patterns.getContext(), kCopyDistributed)},
-          llvm::None));
+      patterns, IREE::LinalgExt::LinalgTransformationFilter(
+                    {StringAttr::get(patterns.getContext(),
+                                     getCopyToWorkgroupMemoryMarker()),
+                     StringAttr::get(patterns.getContext(), kCopyDistributed)},
+                    llvm::None));
 }
 
 /// Return a flattened Id Value by combining the 3D gpu thread IDs.
@@ -370,7 +369,7 @@ class GPUDistributeSharedMemoryCopyPass
     bool isAligned = llvm::all_of(
         copiesToWorkgroupMem, [flatWorkgroupSize](linalg::GenericOp copyOp) {
           MemRefType dstMemRefType =
-              copyOp.getOutputOperand(0)->get().getType().cast<MemRefType>();
+              copyOp.getDpsInitOperand(0)->get().getType().cast<MemRefType>();
           auto shape = dstMemRefType.getShape();
           int targetVectorSize =
               copyVectorNumBits / dstMemRefType.getElementTypeBitWidth();

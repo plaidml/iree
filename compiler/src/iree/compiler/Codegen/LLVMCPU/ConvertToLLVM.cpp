@@ -539,32 +539,62 @@ class HALDispatchABI {
     return castValueToType(loc, constantValue, resultType, builder);
   }
 
+  // Loads the ordinal of the import with the given |importName|.
+  // A placeholder global will be inserted that will be updated with the
+  // assigned ordinal after linking.
+  Value loadImportOrdinal(Location loc, StringRef importName, bool weak,
+                          OpBuilder &builder) {
+    // Create top-level global placeholder.
+    // The magic attribute is used by future assignment passes.
+    std::string globalName = ("__import_ordinal_" + importName).str();
+    auto moduleOp =
+        builder.getInsertionPoint()->getParentOfType<mlir::ModuleOp>();
+    LLVM::GlobalOp globalOp;
+    if (!(globalOp = moduleOp.lookupSymbol<LLVM::GlobalOp>(globalName))) {
+      auto moduleBuilder = OpBuilder::atBlockBegin(moduleOp.getBody());
+      globalOp = moduleBuilder.create<LLVM::GlobalOp>(loc, builder.getI32Type(),
+                                                      /*isConstant=*/false,
+                                                      LLVM::Linkage::Internal,
+                                                      globalName, Attribute{});
+      globalOp->setAttr("hal.executable.import.key",
+                        builder.getStringAttr(importName));
+      if (weak) {
+        globalOp->setAttr("hal.executable.import.weak", builder.getUnitAttr());
+      }
+    }
+
+    // Load the placeholder global ordinal.
+    Value globalPtr = builder.create<LLVM::AddressOfOp>(loc, globalOp);
+    return builder.create<LLVM::LoadOp>(loc, globalPtr);
+  }
+
   // Loads the import function pointer of the import |ordinal|.
   // Equivalent to:
   //   iree_hal_executable_import_v0_t fn_ptr = state->import_funcs[ordinal];
   //   void* context = state->import_contexts[ordinal];
-  std::pair<Value, Value> loadImportFunc(Location loc, int64_t ordinal,
+  std::pair<Value, Value> loadImportFunc(Location loc, Value importOrdinal,
                                          OpBuilder &builder) {
-    auto ordinalValue = getIndexValue(loc, ordinal, builder);
     auto funcPtrsValue =
         loadFieldValue(loc, EnvironmentField::import_funcs, builder);
     auto funcPtrValue = builder.createOrFold<LLVM::GEPOp>(
-        loc, funcPtrsValue.getType(), funcPtrsValue, ordinalValue);
+        loc, funcPtrsValue.getType(), funcPtrsValue, importOrdinal);
     auto contextPtrsValue =
         loadFieldValue(loc, EnvironmentField::import_contexts, builder);
     auto contextPtrValue = builder.createOrFold<LLVM::GEPOp>(
-        loc, contextPtrsValue.getType(), contextPtrsValue, ordinalValue);
+        loc, contextPtrsValue.getType(), contextPtrsValue, importOrdinal);
     return std::make_pair(
         builder.createOrFold<LLVM::LoadOp>(loc, funcPtrValue),
         builder.createOrFold<LLVM::LoadOp>(loc, contextPtrValue));
   }
 
-  // Returns an i1 indicating whether the optional import with |ordinal| is
+  // Returns an i1 indicating whether the optional import with |importName| is
   // defined. Equivalent to:
   //   state->import_funcs[ordinal] != NULL
-  Value isImportFuncAvailable(Location loc, int64_t ordinal,
+  Value isImportFuncAvailable(Location loc, StringRef importName,
                               OpBuilder &builder) {
-    auto importFunc = loadImportFunc(loc, ordinal, builder);
+    auto importOrdinal =
+        loadImportOrdinal(loc, importName, /*weak=*/true, builder);
+    auto importFunc = loadImportFunc(loc, importOrdinal, builder);
     Value nullPtrValue =
         builder.create<LLVM::NullOp>(loc, importFunc.first.getType());
     return builder.create<LLVM::ICmpOp>(loc, builder.getI1Type(),
@@ -572,15 +602,22 @@ class HALDispatchABI {
                                         importFunc.first, nullPtrValue);
   }
 
-  // Emits a call to the import with the given |importOrdinal|.
+  // Emits a call to the import with the given |importName|.
   // The provided |params| struct containing the function-specific arguments
   // is passed without modification.
   // Returns 0 on success and non-zero otherwise.
-  Value callImport(Location loc, unsigned importOrdinal, Value params,
+  Value callImport(Location loc, StringRef importName, bool weak, Value params,
                    OpBuilder &builder) {
+    auto importOrdinal = loadImportOrdinal(loc, importName, weak, builder);
     auto thunkPtrValue =
         loadFieldValue(loc, EnvironmentField::import_thunk, builder);
     auto importFunc = loadImportFunc(loc, importOrdinal, builder);
+
+    // TODO(benvanik): if weak is set then we should bail if the import is not
+    // found. Since we've loaded the import func here we can just compare for
+    // null as in isImportFuncAvailable but we'll need to make the control flow.
+    assert(!weak && "calls to weak imports not yet implemented");
+
     Value nullPtrValue = builder.create<LLVM::NullOp>(
         loc, LLVM::LLVMPointerType::get(builder.getI8Type()));
     auto callOp =
@@ -595,68 +632,82 @@ class HALDispatchABI {
     return callOp.getResult();
   }
 
-  // Emits a call to the import with the given |importOrdinal|.
-  // The provided |resultTypes| and |params| are packed in a struct and transit
+  // Emits a call to a dynamically linked import using the given |importName|
+  // as a template.
+  // The provided |resultTypes| and |args| are packed in a struct and transit
   // through memory so that we can expose a single void* argument.
   // Returns 0 on success and non-zero otherwise.
-  SmallVector<Value> wrapAndCallImport(Location loc, unsigned importOrdinal,
-                                       TypeRange resultTypes, ValueRange params,
-                                       OpBuilder &builder) {
+  SmallVector<Value> wrapAndCallImport(Location loc, StringRef importName,
+                                       bool weak, TypeRange resultTypes,
+                                       ValueRange args, OpBuilder &builder) {
+    // Struct types are ordered [results..., args...].
     SmallVector<Type> types(resultTypes);
-    types.reserve(resultTypes.size() + params.size());
-    for (Value p : params)
-      types.push_back(typeConverter->convertType(p.getType()));
+    types.reserve(resultTypes.size() + args.size());
+    for (Value arg : args) {
+      types.push_back(typeConverter->convertType(arg.getType()));
+    }
 
+    // Pack parameter structure.
     Type structType;
     Value paramsPtr, voidPtr;
-    auto voidPtrTy = LLVM::LLVMPointerType::get(
-        IntegerType::get(builder.getContext(), /*width=*/8));
+    auto voidPtrTy = LLVM::LLVMPointerType::get(builder.getI8Type());
     if (!types.empty()) {
+      // TODO(benvanik): set specific layout to match runtime.
       structType =
           LLVM::LLVMStructType::getLiteral(builder.getContext(), types);
       auto ptrStructType = LLVM::LLVMPointerType::get(structType);
       Value one = builder.create<LLVM::ConstantOp>(loc, builder.getI64Type(),
                                                    builder.getIndexAttr(1));
-      // TODO: something better than alloca to avoid blowing up the stack.
       paramsPtr = builder.create<LLVM::AllocaOp>(loc, ptrStructType, one,
                                                  /*alignment=*/0);
       Value structVal = builder.create<LLVM::UndefOp>(loc, structType);
-      for (int64_t i = 0, e = params.size(); i < e; ++i)
-        structVal = builder.create<LLVM::InsertValueOp>(
-            loc, structVal, params[i], i + resultTypes.size());
+      for (int64_t i = 0, e = args.size(); i < e; ++i) {
+        structVal = builder.create<LLVM::InsertValueOp>(loc, structVal, args[i],
+                                                        i + resultTypes.size());
+      }
       // Store into the alloca'ed descriptor.
       builder.create<LLVM::StoreOp>(loc, structVal, paramsPtr);
       voidPtr = builder.create<LLVM::BitcastOp>(loc, voidPtrTy, paramsPtr);
     } else {
       voidPtr = builder.create<LLVM::UndefOp>(loc, voidPtrTy);
     }
-    // TODO: assert success.
-    auto thunkPtrValue =
-        loadFieldValue(loc, EnvironmentField::import_thunk, builder);
-    auto importFunc = loadImportFunc(loc, importOrdinal, builder);
-    Value nullPtrValue = builder.create<LLVM::NullOp>(
-        loc, LLVM::LLVMPointerType::get(builder.getI8Type()));
-    auto callOp =
-        builder.create<LLVM::CallOp>(loc, TypeRange{builder.getI32Type()},
-                                     ValueRange{
-                                         /*thunk_func_ptr=*/thunkPtrValue,
-                                         /*import_func_ptr=*/importFunc.first,
-                                         /*context=*/importFunc.second,
-                                         /*params=*/voidPtr,
-                                         /*reserved=*/nullPtrValue,
-                                     });
-    callOp->setAttr("__hal_dispatch_abi_import_converted__",
-                    builder.getUnitAttr());
-    if (resultTypes.empty()) return {};
 
+    // Calls return 0 (success) or non-zero (failure).
+    auto callResult = callImport(loc, importName, weak, voidPtr, builder);
+    Block *trueDest =
+        builder.getInsertionBlock()->splitBlock(++builder.getInsertionPoint());
+    Block *falseDest = builder.createBlock(trueDest);
+
+    // Check the call results and branch to exit if it failed.
+    // Note that we weight the true branch (call successful) higher.
+    builder.setInsertionPointAfterValue(callResult);
+    Value zeroI32 = builder.create<LLVM::ConstantOp>(
+        loc, builder.getI32Type(), builder.getI32IntegerAttr(0));
+    Value cmpZero = builder.create<LLVM::ICmpOp>(
+        loc, builder.getI1Type(), LLVM::ICmpPredicate::eq, callResult, zeroI32);
+    builder.create<LLVM::CondBrOp>(loc, cmpZero, trueDest, ValueRange{},
+                                   falseDest, ValueRange{callResult},
+                                   std::make_pair(1u, 0u));
+
+    // Failure return block.
+    // Return the call result to the runtime.
+    builder.setInsertionPointToStart(falseDest);
+    builder.create<LLVM::ReturnOp>(
+        loc, falseDest->addArgument(builder.getI32Type(), loc));
+
+    // Successful continuation block.
+    // Marshal results out of the params struct.
+    builder.setInsertionPointToStart(trueDest);
     SmallVector<Value> results;
-    results.reserve(resultTypes.size());
-    Value structVal = builder.create<LLVM::LoadOp>(loc, structType, paramsPtr);
-    for (int64_t i = 0, e = resultTypes.size(); i < e; ++i) {
-      results.push_back(
-          builder.create<LLVM::ExtractValueOp>(loc, structVal, i));
+    if (!resultTypes.empty()) {
+      results.reserve(resultTypes.size());
+      Value structVal =
+          builder.create<LLVM::LoadOp>(loc, structType, paramsPtr);
+      for (int64_t i = 0, e = resultTypes.size(); i < e; ++i) {
+        results.push_back(
+            builder.create<LLVM::ExtractValueOp>(loc, structVal, i));
+      }
     }
-
     return results;
   }
 
@@ -995,51 +1046,45 @@ class ConvertHALInterfaceBindingSubspanOp : public ConvertToLLVMPattern {
   }
 };
 
-/// Rewrites 0-result CallOp to known imported library using
-/// HALDispatchABI wrapAndCallImport.
+/// Rewrites calls to extern functions to dynamic library import calls.
 /// The parent LLVMFuncOp must be compatible with HALDispatchABI.
 ///
 /// Note: this is an LLVM::CallOp -> LLVM::CallOp rewrite that is introduced
 /// after all conversions are done. Importantly, this is not a conversion
 /// pattern.
-class RewriteCallOpToImportedCallOp : public OpRewritePattern<LLVM::CallOp> {
+class RewriteExternCallOpToDynamicImportCallOp
+    : public OpRewritePattern<LLVM::CallOp> {
  public:
-  explicit RewriteCallOpToImportedCallOp(MLIRContext *context,
-                                         LLVMTypeConverter &converter)
+  explicit RewriteExternCallOpToDynamicImportCallOp(
+      MLIRContext *context, LLVMTypeConverter &converter)
       : OpRewritePattern<LLVM::CallOp>(context), typeConverter(converter) {}
 
   LogicalResult matchAndRewrite(LLVM::CallOp callOp,
                                 PatternRewriter &rewriter) const override {
     auto llvmFuncOp = callOp->getParentOfType<LLVM::LLVMFuncOp>();
     if (!llvmFuncOp) return failure();
-    // Single llvm.ptr<i8>
-    if (callOp->getAttr("__hal_dispatch_abi_import_converted__"))
-      return failure();
-
     HALDispatchABI abi(llvmFuncOp, &typeConverter);
+
+    // Ignore indirect calls (they're probably already converted imports).
     auto symbol = callOp.getCallableForCallee().dyn_cast<SymbolRefAttr>();
     auto flatSymbol = symbol.dyn_cast_or_null<FlatSymbolRefAttr>();
     if (!flatSymbol) return failure();
 
-    // TODO: get ordinal from ABI.
-    llvm::Optional<int> ordinal;
-    if (flatSymbol.getValue() == "xsmm_brgemm_dispatch_f32")
-      ordinal = 0;
-    else if (flatSymbol.getValue() == "xsmm_matmul_dispatch_f32")
-      ordinal = 1;
-    else if (flatSymbol.getValue() == "xsmm_unary_dispatch")
-      ordinal = 2;
-    else if (flatSymbol.getValue() == "xsmm_brgemm_invoke_f32")
-      ordinal = 3;
-    else if (flatSymbol.getValue() == "xsmm_matmul_invoke_f32")
-      ordinal = 4;
-    else if (flatSymbol.getValue() == "xsmm_unary_invoke")
-      ordinal = 5;
+    // Ensure the target function is extern.
+    // To support conversion inserting calls in local patterns that can't add
+    // global function symbols we assume any missing callee is extern.
+    auto calleeOp = SymbolTable::lookupNearestSymbolFrom<LLVM::LLVMFuncOp>(
+        llvmFuncOp, symbol);
+    if (calleeOp && !calleeOp.isExternal()) return failure();
 
-    if (!ordinal) return failure();
+    // TODO(benvanik): way to determine if weak (maybe via linkage?).
+    bool weak = false;
+
+    // Rewrite the call to a dynamic import call.
     SmallVector<Value> results = abi.wrapAndCallImport(
-        callOp->getLoc(), *ordinal, callOp->getResultTypes(),
+        callOp->getLoc(), flatSymbol.getValue(), weak, callOp->getResultTypes(),
         callOp->getOperands(), rewriter);
+
     rewriter.replaceOp(callOp, results);
     return success();
   }
@@ -1050,7 +1095,9 @@ class RewriteCallOpToImportedCallOp : public OpRewritePattern<LLVM::CallOp> {
 
 class ConvertToLLVMPass : public ConvertToLLVMBase<ConvertToLLVMPass> {
  public:
-  ConvertToLLVMPass() = default;
+  ConvertToLLVMPass(bool reassociateFpReductions) {
+    targetReassociateFpReductions.setValue(reassociateFpReductions);
+  }
   ConvertToLLVMPass(const ConvertToLLVMPass &pass) {}
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<LLVM::LLVMDialect, arm_neon::ArmNeonDialect>();
@@ -1066,6 +1113,10 @@ class ConvertToLLVMPass : public ConvertToLLVMBase<ConvertToLLVMPass> {
       *this, "target-data-layout",
       llvm::cl::desc("Code generation target data layout."),
       llvm::cl::init("")};
+  Option<bool> targetReassociateFpReductions{
+      *this, "target-reassociate-fp-reductions",
+      llvm::cl::desc("Code generation target reassociate FP reductions."),
+      llvm::cl::init("false")};
 };
 
 }  // namespace
@@ -1167,7 +1218,8 @@ void ConvertToLLVMPass::runOnOperation() {
   arith::populateArithToLLVMConversionPatterns(converter, patterns);
   populateVectorToSCFConversionPatterns(patterns);
   populateVectorToLLVMMatrixConversionPatterns(converter, patterns);
-  populateVectorToLLVMConversionPatterns(converter, patterns);
+  populateVectorToLLVMConversionPatterns(
+      converter, patterns, targetReassociateFpReductions.getValue());
   populateLinalgToLLVMConversionPatterns(converter, patterns);
   populateReconcileUnrealizedCastsPatterns(patterns);
 
@@ -1195,10 +1247,11 @@ void ConvertToLLVMPass::runOnOperation() {
     return;
   }
 
-  // Rewrite Calls to imported library functions.
+  // Rewrite any extern calls emitted to dynamic library imports.
   {
     RewritePatternSet patterns(&getContext());
-    patterns.insert<RewriteCallOpToImportedCallOp>(&getContext(), converter);
+    patterns.insert<RewriteExternCallOpToDynamicImportCallOp>(&getContext(),
+                                                              converter);
     if (failed(applyPatternsAndFoldGreedily(module, std::move(patterns))))
       return signalPassFailure();
   }
@@ -1218,8 +1271,9 @@ void ConvertToLLVMPass::runOnOperation() {
   }
 }
 
-std::unique_ptr<OperationPass<ModuleOp>> createConvertToLLVMPass() {
-  return std::make_unique<ConvertToLLVMPass>();
+std::unique_ptr<OperationPass<ModuleOp>> createConvertToLLVMPass(
+    bool reassociateFpReductions) {
+  return std::make_unique<ConvertToLLVMPass>(reassociateFpReductions);
 }
 
 }  // namespace iree_compiler

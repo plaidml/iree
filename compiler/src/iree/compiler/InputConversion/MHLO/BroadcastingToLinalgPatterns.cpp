@@ -10,9 +10,9 @@
 
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/InputConversion/MHLO/Rewriters.h"
-#include "mlir-hlo/Dialect/mhlo/IR/hlo_ops.h"
-#include "mlir-hlo/Dialect/mhlo/transforms/map_chlo_to_hlo_op.h"
-#include "mlir-hlo/Dialect/mhlo/transforms/rewriters.h"
+#include "mhlo/IR/hlo_ops.h"
+#include "mhlo/transforms/map_chlo_to_hlo_op.h"
+#include "mhlo/transforms/rewriters.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -38,15 +38,15 @@ bool isElementTypeLegalForCodegen(Type t) { return !t.isa<ComplexType>(); }
 /// Returns an ArrayAttr that contains `nLoops` attributes. All the attributes
 /// are "parallel" except the last `nReduction` elements, where are "reduction"
 /// attributes.
-SmallVector<StringRef, 3> getParallelAndReductionIterators(int nLoops,
-                                                           int nReduction) {
-  SmallVector<StringRef, 3> res(nLoops - nReduction,
-                                getParallelIteratorTypeName());
-  res.append(nReduction, getReductionIteratorTypeName());
+SmallVector<utils::IteratorType, 3> getParallelAndReductionIterators(
+    int nLoops, int nReduction) {
+  SmallVector<utils::IteratorType, 3> res(nLoops - nReduction,
+                                          utils::IteratorType::parallel);
+  res.append(nReduction, utils::IteratorType::reduction);
   return res;
 }
 
-SmallVector<StringRef, 3> getNParallelLoopsAttrs(int nParallelLoops) {
+SmallVector<utils::IteratorType, 3> getNParallelLoopsAttrs(int nParallelLoops) {
   return getParallelAndReductionIterators(nParallelLoops, 0);
 }
 
@@ -98,7 +98,7 @@ Value broadcast(OpBuilder &builder, Location loc, Value operand,
     if (dim.isStatic()) {
       resultShape.push_back(dim.getStatic());
     } else {
-      resultShape.push_back(-1);
+      resultShape.push_back(ShapedType::kDynamic);
       dynDims.push_back(dim.getValue());
     }
   }
@@ -118,8 +118,8 @@ Value broadcast(OpBuilder &builder, Location loc, Value operand,
   }
 
   int nloops = resultExtents.size();
-  Value init = builder.create<linalg::InitTensorOp>(
-      loc, dynDims, resultShape, operandType.getElementType());
+  Value init = builder.create<tensor::EmptyOp>(
+      loc, resultShape, operandType.getElementType(), dynDims);
   auto generic = builder.create<linalg::GenericOp>(
       loc, TypeRange{init.getType()}, ValueRange{operand},
       /*outputBuffers=*/ValueRange{init},
@@ -322,7 +322,7 @@ struct ConvertConstantLikeOp
     // Lower to MHLO constant if statically shaped.
     if (resultTy.hasStaticShape()) {
       rewriter.replaceOpWithNewOp<mhlo::ConstantOp>(
-          op, DenseElementsAttr::get(resultTy, op.value()));
+          op, DenseElementsAttr::get(resultTy, op.getValue()));
       return success();
     }
 
@@ -331,11 +331,11 @@ struct ConvertConstantLikeOp
     int resultRank = resultTy.getRank();
     SmallVector<Extent> resultExtents;
     resultExtents.reserve(resultRank);
-    appendExtents(rewriter, loc, resultExtents, adaptor.operand(), resultTy);
+    appendExtents(rewriter, loc, resultExtents, adaptor.getOperand(), resultTy);
 
     auto resultTy0D = RankedTensorType::get({}, resultTy.getElementType());
     Value scalarConst = rewriter.create<mhlo::ConstantOp>(
-        loc, DenseElementsAttr::get(resultTy0D, op.value()));
+        loc, DenseElementsAttr::get(resultTy0D, op.getValue()));
     Value broadcasted =
         broadcastScalar(rewriter, loc, scalarConst, resultExtents);
     rewriter.replaceOp(op, {broadcasted});
@@ -378,7 +378,8 @@ struct SimpleBinaryBroadcastingAdaptor : public BinaryBroadcastingAdaptor {
   }
   LogicalResult verifyBroadcastCompatibility(
       Operation *op, ArrayRef<Value> operands) override {
-    auto broadcastDimensions = llvm::cast<FromOpTy>(op).broadcast_dimensions();
+    auto broadcastDimensions =
+        llvm::cast<FromOpTy>(op).getBroadcastDimensions();
     if (broadcastDimensions &&
         !hlo::isLegalNumpyRankedBroadcast(operands[0], operands[1],
                                           *broadcastDimensions)) {
@@ -411,7 +412,7 @@ struct CompareBinaryBroadcastingAdaptor : public BinaryBroadcastingAdaptor {
   LogicalResult verifyBroadcastCompatibility(
       Operation *op, ArrayRef<Value> operands) override {
     auto broadcastDimensions =
-        llvm::cast<chlo::BroadcastCompareOp>(op).broadcast_dimensions();
+        llvm::cast<chlo::BroadcastCompareOp>(op).getBroadcastDimensions();
     if (broadcastDimensions &&
         !hlo::isLegalNumpyRankedBroadcast(operands[0], operands[1],
                                           *broadcastDimensions)) {
@@ -422,21 +423,21 @@ struct CompareBinaryBroadcastingAdaptor : public BinaryBroadcastingAdaptor {
   BroadcastValues getFromBroadcastValues(Operation *op,
                                          ArrayRef<Value> operands) override {
     chlo::BroadcastCompareOpAdaptor adaptor(operands, op->getAttrDictionary());
-    return std::make_pair(adaptor.lhs(), adaptor.rhs());
+    return std::make_pair(adaptor.getLhs(), adaptor.getRhs());
   }
   Operation *createTargetOperation(Location loc, Operation *op, Type resultType,
                                    ArrayRef<Value> operands,
                                    BroadcastValues broadcastValues,
                                    OpBuilder &builder) override {
     chlo::BroadcastCompareOpAdaptor adaptor(operands, op->getAttrDictionary());
-    Optional<chlo::ComparisonType> chloCmpType = adaptor.compare_type();
+    Optional<chlo::ComparisonType> chloCmpType = adaptor.getCompareType();
     mhlo::ComparisonTypeAttr mhloCmpType;
     if (chloCmpType)
       mhloCmpType = mhlo::ComparisonTypeAttr::get(
           builder.getContext(), *chlo::mhloComparisonType(*chloCmpType));
     return builder.create<mhlo::CompareOp>(
         loc, resultType, broadcastValues.first, broadcastValues.second,
-        *chlo::mhloComparisonDirection(adaptor.comparison_direction()),
+        *chlo::mhloComparisonDirection(adaptor.getComparisonDirection()),
         mhloCmpType);
   }
 };
@@ -609,9 +610,9 @@ struct ConvertSelectOp : public OpConversionPattern<chlo::BroadcastSelectOp> {
     Location loc = op.getLoc();
 
     // Only support ranked operands.
-    Value pred = adaptor.pred();
-    Value thenValue = adaptor.on_true();
-    Value elseValue = adaptor.on_false();
+    Value pred = adaptor.getPred();
+    Value thenValue = adaptor.getOnTrue();
+    Value elseValue = adaptor.getOnFalse();
     auto predType = pred.getType().dyn_cast<RankedTensorType>();
     auto thenType = thenValue.getType().dyn_cast<RankedTensorType>();
     auto elseType = elseValue.getType().dyn_cast<RankedTensorType>();
@@ -723,8 +724,8 @@ struct ConvertDynamicReshapeOp
       mhlo::DynamicReshapeOp op, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
-    Value input = adaptor.operand();
-    Value outputShape = adaptor.output_shape();
+    Value input = adaptor.getOperand();
+    Value outputShape = adaptor.getOutputShape();
     auto outputShapeType = outputShape.getType().dyn_cast<RankedTensorType>();
     auto resultType = typeConverter->convertType(op.getType())
                           .dyn_cast_or_null<RankedTensorType>();

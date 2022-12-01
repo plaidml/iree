@@ -18,7 +18,7 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/Interfaces/ViewLikeInterface.td"
 
 class Stream_PureOp<string mnemonic, list<Trait> traits = []> :
-    Stream_Op<mnemonic, !listconcat(traits, [NoSideEffect])>;
+    Stream_Op<mnemonic, !listconcat(traits, [Pure])>;
 
 //===----------------------------------------------------------------------===//
 // Generic resource ops
@@ -755,6 +755,8 @@ def Stream_TensorEmptyOp : Stream_PureOp<"tensor.empty", [
     Returns a typed resource initialized with no contents. This still carries
     shape metadata and may encode to a non-empty resource such as in cases
     where the empty representation still has data (e.g. sparse tensors).
+    Subsequent writes must populate any ranges of the tensor that are later
+    read.
   }];
 
   let arguments = (ins
@@ -1351,7 +1353,7 @@ def Stream_AsyncAllocaOp : Stream_PureOp<"async.alloca", [
     OptionalAttr<Stream_AffinityAttr>:$affinity
   );
   let results = (outs
-    Stream_TransientResource:$result
+    Stream_AnyStreamResource:$result
   );
 
   let assemblyFormat = [{
@@ -1372,6 +1374,9 @@ def Stream_AsyncConstantOp : Stream_PureOp<"async.constant", [
   Stream_AsyncPhaseOp,
   DeclareOpInterfaceMethods<Stream_StreamableOp, [
     "isMetadata",
+  ]>,
+  DeclareOpInterfaceMethods<Stream_AsyncAccessOp, [
+    "getAsyncAccessRanges",
   ]>,
   Util_SizeAwareOp,
   DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
@@ -1415,6 +1420,9 @@ def Stream_AsyncSplatOp : Stream_Op<"async.splat", [
   DeclareOpInterfaceMethods<Stream_StreamableOp, [
     "preferCloneToConsumers",
   ]>,
+  DeclareOpInterfaceMethods<Stream_AsyncAccessOp, [
+    "getAsyncAccessRanges",
+  ]>,
   Util_SizeAwareOp,
 ]> {
   let summary = [{splats a value into a resource}];
@@ -1453,6 +1461,9 @@ def Stream_AsyncCloneOp : Stream_Op<"async.clone", [
   Stream_AsyncPhaseOp,
   DeclareOpInterfaceMethods<Stream_StreamableOp, [
     "preferCloneToConsumers",
+  ]>,
+  DeclareOpInterfaceMethods<Stream_AsyncAccessOp, [
+    "getAsyncAccessRanges",
   ]>,
   Util_SizeAwareOp,
 ]> {
@@ -1495,8 +1506,9 @@ def Stream_AsyncSliceOp : Stream_PureOp<"async.slice", [
   AllTypesMatch<["source", "result"]>,
   Stream_AffinityOp,
   Stream_AsyncPhaseOp,
-  DeclareOpInterfaceMethods<Stream_StreamableOp, [
-    "isMetadata",
+  Stream_StreamableOp,
+  DeclareOpInterfaceMethods<Stream_AsyncAccessOp, [
+    "getAsyncAccessRanges",
   ]>,
   Util_SizeAwareOp,
 ]> {
@@ -1542,6 +1554,9 @@ def Stream_AsyncFillOp : Stream_Op<"async.fill", [
   Stream_AffinityOp,
   Stream_AsyncPhaseOp,
   Stream_StreamableOp,
+  DeclareOpInterfaceMethods<Stream_AsyncAccessOp, [
+    "getAsyncAccessRanges",
+  ]>,
   Util_SizeAwareOp,
   DeclareOpInterfaceMethods<Util_TiedOpInterface, [
     "getTiedResult",
@@ -1593,8 +1608,9 @@ def Stream_AsyncUpdateOp : Stream_Op<"async.update", [
   AllTypesMatch<["target", "result"]>,
   Stream_AffinityOp,
   Stream_AsyncPhaseOp,
-  DeclareOpInterfaceMethods<Stream_StreamableOp, [
-    "isMetadata",
+  Stream_StreamableOp,
+  DeclareOpInterfaceMethods<Stream_AsyncAccessOp, [
+    "getAsyncAccessRanges",
   ]>,
   Util_SizeAwareOp,
   DeclareOpInterfaceMethods<Util_TiedOpInterface, [
@@ -1650,6 +1666,9 @@ def Stream_AsyncCopyOp : Stream_Op<"async.copy", [
   Stream_AffinityOp,
   Stream_AsyncPhaseOp,
   Stream_StreamableOp,
+  DeclareOpInterfaceMethods<Stream_AsyncAccessOp, [
+    "getAsyncAccessRanges",
+  ]>,
   Util_SizeAwareOp,
   DeclareOpInterfaceMethods<Util_TiedOpInterface, [
     "getTiedResult",
@@ -1709,6 +1728,9 @@ def Stream_AsyncTransferOp : Stream_Op<"async.transfer", [
   Stream_AffinityOp,
   Stream_AsyncPhaseOp,
   Stream_StreamableOp,
+  DeclareOpInterfaceMethods<Stream_AsyncAccessOp, [
+    "getAsyncAccessRanges",
+  ]>,
   Util_SizeAwareOp,
 ]> {
   let summary = [{transfers a resource from one location/state to another}];
@@ -1843,6 +1865,9 @@ def Stream_AsyncDispatchOp : Stream_Op<"async.dispatch", [
   Stream_AffinityOp,
   Stream_AsyncPhaseOp,
   Stream_StreamableOp,
+  DeclareOpInterfaceMethods<Stream_AsyncAccessOp, [
+    "getAsyncAccessRanges",
+  ]>,
   Util_SizeAwareOp,
   DeclareOpInterfaceMethods<Util_TiedOpInterface, [
     "getTiedOperandsIndexAndLength",
@@ -1863,6 +1888,9 @@ def Stream_AsyncDispatchOp : Stream_Op<"async.dispatch", [
       Stream_PrimitiveType,
     ]>>:$resource_operands,
     Variadic<Stream_Size>:$resource_operand_sizes,
+    Variadic<Stream_Offset>:$resource_operand_offsets,
+    Variadic<Stream_Offset>:$resource_operand_ends,
+    Variadic<Stream_Size>:$resource_operand_lengths,
     Variadic<Stream_Size>:$result_sizes,
     OptionalAttr<Util_TiedOpStorageAttr>:$tied_operands,
     OptionalAttr<Stream_AffinityAttr>:$affinity
@@ -1875,7 +1903,10 @@ def Stream_AsyncDispatchOp : Stream_Op<"async.dispatch", [
     (`on` `(` $affinity^ `)`)?
     $entry_point
     (`[` $workload^ `]`)? ``
-    `(` $resource_operands `)` attr-dict `:`
+    `(` custom<DispatchOperands>($resource_operands,
+                                 $resource_operand_offsets,
+                                 $resource_operand_ends,
+                                 $resource_operand_lengths) `)` attr-dict `:`
     custom<ShapedFunctionType>(ref($resource_operands),
                                type($resource_operands), $resource_operand_sizes,
                                type($results), $result_sizes,
@@ -1906,13 +1937,16 @@ def Stream_AsyncDispatchOp : Stream_Op<"async.dispatch", [
 
 def Stream_AsyncExecuteOp : Stream_Op<"async.execute", [
   AttrSizedOperandSegments,
-  RecursiveSideEffects,
+  RecursiveMemoryEffects,
   DeclareOpInterfaceMethods<RegionBranchOpInterface, [
     "getSuccessorEntryOperands",
   ]>,
   SingleBlockImplicitTerminator<"IREE::Stream::YieldOp">,
   Stream_AffinityOp,
   Stream_AsyncPhaseOp,
+  DeclareOpInterfaceMethods<Stream_AsyncAccessOp, [
+    "getAsyncAccessRanges",
+  ]>,
   Stream_TimelineOp,
   Util_SizeAwareOp,
   DeclareOpInterfaceMethods<Util_ClosureOpInterface>,
@@ -1998,7 +2032,7 @@ def Stream_AsyncConcurrentOp : Stream_Op<"async.concurrent", [
     "IREE::Stream::AsyncConcurrentOp",
   ]>,
   AttrSizedOperandSegments,
-  RecursiveSideEffects,
+  RecursiveMemoryEffects,
   DeclareOpInterfaceMethods<RegionBranchOpInterface, [
     "getSuccessorEntryOperands",
   ]>,
@@ -2006,6 +2040,9 @@ def Stream_AsyncConcurrentOp : Stream_Op<"async.concurrent", [
   Stream_AffinityOp,
   Stream_AsyncPhaseOp,
   Stream_StreamableOp,
+  DeclareOpInterfaceMethods<Stream_AsyncAccessOp, [
+    "getAsyncAccessRanges",
+  ]>,
   Util_SizeAwareOp,
   DeclareOpInterfaceMethods<Util_ClosureOpInterface>,
   DeclareOpInterfaceMethods<Util_TiedOpInterface>,
@@ -2363,7 +2400,7 @@ def Stream_CmdDispatchOp : Stream_Op<"cmd.dispatch", [
 
 def Stream_CmdExecuteOp : Stream_Op<"cmd.execute", [
   AttrSizedOperandSegments,
-  RecursiveSideEffects,
+  RecursiveMemoryEffects,
   DeclareOpInterfaceMethods<RegionBranchOpInterface, [
     "getSuccessorEntryOperands",
   ]>,
@@ -2444,7 +2481,7 @@ def Stream_CmdSerialOp : Stream_Op<"cmd.serial", [
     "IREE::Stream::CmdSerialOp",
     "IREE::Stream::CmdConcurrentOp",
   ]>,
-  RecursiveSideEffects,
+  RecursiveMemoryEffects,
   DeclareOpInterfaceMethods<RegionBranchOpInterface>,
   SingleBlockImplicitTerminator<"IREE::Stream::YieldOp">,
   Stream_CmdPhaseOp,
@@ -2510,7 +2547,7 @@ def Stream_CmdConcurrentOp : Stream_Op<"cmd.concurrent", [
     "IREE::Stream::CmdSerialOp",
     "IREE::Stream::CmdConcurrentOp",
   ]>,
-  RecursiveSideEffects,
+  RecursiveMemoryEffects,
   DeclareOpInterfaceMethods<RegionBranchOpInterface>,
   SingleBlockImplicitTerminator<"IREE::Stream::YieldOp">,
   Stream_CmdPhaseOp,
@@ -2632,7 +2669,7 @@ def Stream_TimepointExportOp : Stream_PureOp<"timepoint.export", [
 ]> {
   let summary = [{exports a timepoint to an external dialect type}];
   let description = [{
-    Defines a conversion to an external dialect type such as `hal.semaphore`
+    Defines a conversion to an external dialect type such as `hal.fence`
     that is resolved during lowering into the stream dialect. This can be used
     to interoperate between levels of the stack that require specifying stream
     types and those that prior to lowering do not handle them.
@@ -2655,6 +2692,33 @@ def Stream_TimepointExportOp : Stream_PureOp<"timepoint.export", [
   }];
 
   let hasFolder = 1;
+}
+
+def Stream_TimepointChainExternalOp :
+    Stream_Op<"timepoint.chain_external", [
+      Stream_AffinityOp,
+    ]> {
+  let summary = [{exports a timepoint to an external dialect type}];
+  let description = [{
+    Defines a conversion to an external dialect type such as `hal.fence`
+    that is resolved during lowering into the stream dialect. This can be used
+    to interoperate between levels of the stack that require specifying stream
+    types and those that prior to lowering do not handle them.
+  }];
+
+  let arguments = (ins
+    Stream_Timepoint:$await_timepoint,
+    Variadic<AnyType>:$external_values,
+    OptionalAttr<Stream_AffinityAttr>:$affinity
+  );
+
+  let assemblyFormat = [{
+    (`on` `(` $affinity^ `)`)?
+    $await_timepoint
+    `=` `` `>`
+    `(` $external_values `:` type($external_values) `)`
+    attr-dict-with-keyword
+  }];
 }
 
 def Stream_TimepointJoinOp : Stream_PureOp<"timepoint.join", [
@@ -2682,6 +2746,63 @@ def Stream_TimepointJoinOp : Stream_PureOp<"timepoint.join", [
 
   let hasCanonicalizer = 1;
   let hasFolder = 1;
+}
+
+def Stream_TimepointBarrierOp : Stream_PureOp<"timepoint.barrier", [
+  AllTypesMatch<["resource", "result"]>,
+  Stream_AffinityOp,
+  Stream_TimelineOp,
+  Util_SizeAwareOp,
+  DeclareOpInterfaceMethods<Util_TiedOpInterface, [
+    "getTiedResult",
+    "getTiedResultOperandIndex",
+    "getTiedResultOperandIndices",
+    "getTiedResultsIndexAndLength",
+  ]>,
+]> {
+  let summary = [{returns a timepoint indicating when a resource is available}];
+  let description = [{
+    After asynchronous execution scheduling resources may exist in different
+    states at different points in the execution timeline. This op enables
+    identifying when the version of a resource after a particular point in the
+    timeline is available. As timepoints transitively chain the timepoint must
+    only cover the resource availability but not be limited to its original
+    production timepoint.
+  }];
+
+  let arguments = (ins
+    AnyTypeOf<[
+      Stream_AnyStreamResource,
+      Stream_StagingResource,
+    ]>:$resource,
+    Stream_Size:$resource_size,
+    OptionalAttr<Stream_AffinityAttr>:$affinity
+  );
+  let results = (outs
+    AnyTypeOf<[
+      Stream_AnyStreamResource,
+      Stream_StagingResource,
+    ]>:$result,
+    Stream_Timepoint:$result_timepoint
+  );
+
+  let assemblyFormat = [{
+    (`on` `(` $affinity^ `)`)?
+    $resource `:` type($resource) `` `{` $resource_size `}`
+    `=` `` `>`
+    type($result_timepoint)
+    attr-dict-with-keyword
+  }];
+
+  let extraClassDeclaration = [{
+    Value getOperandSize(unsigned idx) { return getResourceSize(); }
+    Value getResultSize(unsigned idx) { return getResourceSize(); }
+    SmallVector<Value> getAwaitTimepoints() { return {}; }
+  }];
+
+  let hasVerifier = 1;
+
+  let hasCanonicalizer = 1;
 }
 
 def Stream_TimepointAwaitOp : Stream_PureOp<"timepoint.await", [
@@ -2893,7 +3014,7 @@ def Stream_ReturnOp : Stream_Op<"return", [
   ParentOneOf<[
     "IREE::Stream::ExecutableExportOp",
   ]>,
-  NoSideEffect,
+  Pure,
   DeclareOpInterfaceMethods<RegionBranchTerminatorOpInterface, [
     "getMutableSuccessorOperands",
   ]>,
@@ -2923,7 +3044,7 @@ def Stream_YieldOp : Stream_Op<"yield", [
     "IREE::Stream::CmdSerialOp",
     "IREE::Stream::CmdConcurrentOp",
   ]>,
-  NoSideEffect,
+  Pure,
   DeclareOpInterfaceMethods<RegionBranchTerminatorOpInterface, [
     "getMutableSuccessorOperands",
   ]>,

@@ -17,6 +17,7 @@
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/Transforms.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -55,7 +56,7 @@ static void populateTilingPatterns(RewritePatternSet &patterns,
                            .setTileSizeComputationFunction(tileSizesFn);
   MLIRContext *context = patterns.getContext();
 
-  linalg::LinalgTransformationFilter filter(
+  IREE::LinalgExt::LinalgTransformationFilter filter(
       ArrayRef<StringAttr>{
           StringAttr::get(context, getWorkgroupMemoryMarker())},
       StringAttr::get(context, getWorkgroupKTiledMarker()));
@@ -119,21 +120,25 @@ static LogicalResult tileParallelDims(func::FuncOp funcOp,
     // If there are no dimensions to tile skip the transformation.
     if (partitionedLoops.empty()) continue;
     SmallVector<OpFoldResult> numThreads(numLoops, rewriter.getIndexAttr(0));
-    int64_t id = 0;
-    int64_t threadId = 0;
-    SmallVector<int64_t> idDims;
+    int64_t id = 0, threadDim = 0;
+    SmallVector<Attribute> idDims;
+    auto getThreadMapping = [&](int64_t dim) {
+      return mlir::gpu::GPUThreadMappingAttr::get(
+          tilingOp->getContext(), dim == 0   ? mlir::gpu::Threads::DimX
+                                  : dim == 1 ? mlir::gpu::Threads::DimY
+                                             : mlir::gpu::Threads::DimZ);
+    };
     for (unsigned loop : llvm::reverse(partitionedLoops)) {
       int64_t num = elementPerWorkgroup[id++];
       if (num > 1) {
         numThreads[loop] = rewriter.getIndexAttr(num);
-        idDims.push_back(threadId++);
+        idDims.push_back(getThreadMapping(threadDim++));
       }
     }
     std::reverse(idDims.begin(), idDims.end());
-    for (int64_t i = threadId; i < 3; i++) idDims.push_back(i);
-
+    ArrayAttr mapping = rewriter.getArrayAttr(idDims);
     auto tilingResult =
-        linalg::tileToForeachThreadOp(rewriter, tilingOp, numThreads, idDims);
+        linalg::tileToForeachThreadOp(rewriter, tilingOp, numThreads, mapping);
     rewriter.replaceOp(tilingOp, tilingResult->tileOp->getResults());
   }
   return success();
@@ -194,14 +199,14 @@ struct LLVMGPUTileTensorPass
   LLVMGPUTileTensorPass(bool distributeToWarp)
       : distributeToWarp(distributeToWarp) {}
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<AffineDialect, gpu::GPUDialect>();
+    registry.insert<AffineDialect, gpu::GPUDialect, scf::SCFDialect>();
   }
   void runOnOperation() override {
     auto funcOp = getOperation();
     if (!isEntryPoint(funcOp)) return;
 
     funcOp->walk([&](linalg::LinalgOp op) {
-      op->removeAttr(linalg::LinalgTransforms::kLinalgTransformMarker);
+      op->removeAttr(IREE::LinalgExt::LinalgTransforms::kLinalgTransformMarker);
     });
 
     auto workgroupSize = llvm::to_vector<4>(llvm::map_range(

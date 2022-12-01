@@ -40,6 +40,12 @@ static void addCleanupPatterns(OpPassManager &passManager) {
   passManager.addPass(IREE::Util::createApplyPatternsPass());
   passManager.addPass(IREE::Util::createFoldGlobalsPass());
   passManager.addPass(IREE::Util::createFuseGlobalsPass());
+
+  // Large IPO pass. Note that this can introduce a significant amount of
+  // duplication/inlined constants and we'll want to ensure we're running
+  // cleanup again after (this entire set of patterns is run in a fixed-point
+  // iteration to do that).
+  passManager.addPass(IREE::Util::createIPOPass());
 }
 
 //===----------------------------------------------------------------------===//
@@ -128,12 +134,16 @@ void buildStreamAsyncPassPipeline(OpPassManager &passManager,
   FunctionLikeNest(passManager)
       .addPass(IREE::Stream::createMaterializeCopyOnWritePass);
   passManager.addPass(IREE::Stream::createElideAsyncCopiesPass());
+  FunctionLikeNest(passManager)
+      .addPass(mlir::createCanonicalizerPass)
+      .addPass(IREE::Stream::createEmplaceAllocationsPass);
 
   // Refine lifetime of all resources across the module.
   // We do this after scheduling execution so that we know how the resources
   // move across devices. We do it before scheduling waves as lifetime doesn't
   // change and it makes the IR cleaner.
   passManager.addPass(IREE::Stream::createRefineUsagePass());
+  addCleanupPatterns(passManager);
 
   //----------------------------------------------------------------------------
   // Stream formation and scheduling

@@ -15,8 +15,8 @@
 #include "iree/compiler/InputConversion/MHLO/PassDetail.h"
 #include "iree/compiler/InputConversion/MHLO/Passes.h"
 #include "iree/compiler/InputConversion/MHLO/Rewriters.h"
-#include "mlir-hlo/Dialect/mhlo/IR/hlo_ops.h"
-#include "mlir-hlo/Dialect/mhlo/transforms/map_mhlo_to_scalar_op.h"
+#include "mhlo/IR/hlo_ops.h"
+#include "mhlo/transforms/map_mhlo_to_scalar_op.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -164,8 +164,8 @@ struct SortOpConversion : public OpConversionPattern<mhlo::SortOp> {
     auto sortOp = rewriter.create<IREE::LinalgExt::SortOp>(
         loc, resultTypes,
         /*inputs=*/ValueRange{}, adaptor.getOperands(),
-        mhloSortOp.dimensionAttr());
-    rewriter.inlineRegionBefore(mhloSortOp.comparator(), sortOp.getRegion(),
+        mhloSortOp.getDimensionAttr());
+    rewriter.inlineRegionBefore(mhloSortOp.getComparator(), sortOp.getRegion(),
                                 sortOp.getRegion().begin());
     Region &region = sortOp.getRegion();
     Block &block = region.front();
@@ -199,8 +199,8 @@ struct ScatterOpConversion : public OpConversionPattern<mhlo::ScatterOp> {
   /// * Inserted window dims order: (0, ... , d)
   /// * Update window dims order: (d + 1, ... , m)
   static bool hasCanonicalDimensionNumbers(mhlo::ScatterOp op) {
-    auto dimNumbers = op.scatter_dimension_numbers();
-    auto indicesType = op.scatter_indices().getType().cast<ShapedType>();
+    auto dimNumbers = op.getScatterDimensionNumbers();
+    auto indicesType = op.getScatterIndices().getType().cast<ShapedType>();
     auto indicesRank = indicesType.getRank();
     auto indexVectorDim = dimNumbers.getIndexVectorDim();
     auto indexDepth = indicesType.getShape().back();
@@ -209,10 +209,6 @@ struct ScatterOpConversion : public OpConversionPattern<mhlo::ScatterOp> {
     if (indicesRank != 2) return false;
     if (indexVectorDim != indicesRank - 1) return false;
     if (scatterDimsToOperandDims.size() != indexDepth) return false;
-
-    for (auto en : llvm::enumerate(scatterDimsToOperandDims)) {
-      if (en.index() != en.value()) return false;
-    }
 
     auto insertedWindowDims = dimNumbers.getInsertedWindowDims();
     for (auto en : llvm::enumerate(insertedWindowDims)) {
@@ -231,22 +227,30 @@ struct ScatterOpConversion : public OpConversionPattern<mhlo::ScatterOp> {
       mhlo::ScatterOp op, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const final {
     if (!hasCanonicalDimensionNumbers(op)) return failure();
-    if (llvm::size(op.operands()) != 1)
+    if (llvm::size(op.getInputs()) != 1)
       return op.emitError("NYI variadic operands scatter");
-    if (llvm::size(op.updates()) != 1)
+    if (llvm::size(op.getUpdates()) != 1)
       return op.emitError("NYI variadic updates scatter");
 
     ImplicitLocOpBuilder b(op.getLoc(), rewriter);
 
-    Value original = adaptor.operands().front();
-    Value indices = adaptor.scatter_indices();
-    Value updates = adaptor.updates().front();
+    Value original = adaptor.getInputs().front();
+    Value indices = adaptor.getScatterIndices();
+    Value updates = adaptor.getUpdates().front();
+
+    llvm::SmallVector<int64_t> scatterDimMap;
+    for (auto dim :
+         op.getScatterDimensionNumbers().getScatterDimsToOperandDims()) {
+      scatterDimMap.push_back(dim);
+    }
 
     auto scatterOp = rewriter.create<IREE::LinalgExt::ScatterOp>(
         op.getLoc(), op->getResultTypes(), ValueRange{updates, indices},
-        ValueRange{original}, op.unique_indices());
+        ValueRange{original}, rewriter.getI64ArrayAttr(scatterDimMap),
+        op.getUniqueIndices());
 
-    rewriter.inlineRegionBefore(op.update_computation(), scatterOp.getRegion(),
+    rewriter.inlineRegionBefore(op.getUpdateComputation(),
+                                scatterOp.getRegion(),
                                 scatterOp.getRegion().begin());
     Region &region = scatterOp.getRegion();
     TypeConverter::SignatureConversion signatureConverter(2);
@@ -292,22 +296,23 @@ struct FftOpConversion : public OpConversionPattern<mhlo::FftOp> {
 
     SmallVector<Value> dynSizes;
     for (auto en : llvm::enumerate(realType.getShape())) {
-      if (en.value() == ShapedType::kDynamicSize) {
+      if (en.value() == ShapedType::kDynamic) {
         dynSizes.push_back(b.create<tensor::DimOp>(real, en.index()));
       }
     }
-    Value initTensor = b.create<linalg::InitTensorOp>(
-        dynSizes, realType.getShape(), realType.getElementType());
+    Value emptyTensor = b.create<tensor::EmptyOp>(
+        realType.getShape(), realType.getElementType(), dynSizes);
 
     SmallVector<AffineMap> maps;
     maps.push_back(
         AffineMap::get(rank, 0, b.getAffineDimExpr(rank - 1), b.getContext()));
     maps.push_back(b.getMultiDimIdentityMap(rank));
-    SmallVector<StringRef> iterTypes(rank, getParallelIteratorTypeName());
+    SmallVector<utils::IteratorType> iterTypes(rank,
+                                               utils::IteratorType::parallel);
 
     Value indices = getBitReversalBuffer(b, fftLength);
     auto genericOp = b.create<linalg::GenericOp>(
-        TypeRange{realType}, indices, initTensor, maps, iterTypes,
+        TypeRange{realType}, indices, emptyTensor, maps, iterTypes,
         [&](OpBuilder &b, Location loc, ValueRange args) {
           SmallVector<Value> ivs;
           for (auto i : llvm::seq<unsigned>(0, rank - 1)) {
@@ -347,11 +352,12 @@ struct FftOpConversion : public OpConversionPattern<mhlo::FftOp> {
       mhlo::FftOp op, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const final {
     // Only handle 2^n fft length.
-    auto operandType = adaptor.operand().getType().dyn_cast<RankedTensorType>();
+    auto operandType =
+        adaptor.getOperand().getType().dyn_cast<RankedTensorType>();
     if (!operandType || !operandType.hasStaticShape()) {
       return failure();
     }
-    int fftLength = op.fft_length().getSplatValue<IntegerAttr>().getInt();
+    int fftLength = op.getFftLength().getSplatValue<IntegerAttr>().getInt();
     if (fftLength & (fftLength - 1)) {
       return rewriter.notifyMatchFailure(
           op, "expected FFT length to be a power of two");
@@ -359,7 +365,7 @@ struct FftOpConversion : public OpConversionPattern<mhlo::FftOp> {
 
     ImplicitLocOpBuilder b(op.getLoc(), rewriter);
     SmallVector<Value> results =
-        getBitReversalOrder(b, adaptor.operand(), fftLength);
+        getBitReversalOrder(b, adaptor.getOperand(), fftLength);
     int lognPlus1 = std::log(fftLength) / std::log(2) + 1;
     for (auto s : llvm::seq<unsigned>(1, lognPlus1)) {
       SmallVector<Value> inputs;
@@ -378,9 +384,9 @@ struct FftOpConversion : public OpConversionPattern<mhlo::FftOp> {
     SmallVector<OpFoldResult> offsets(ty.getRank(), b.getIndexAttr(0));
     SmallVector<OpFoldResult> strides(ty.getRank(), b.getIndexAttr(1));
     SmallVector<OpFoldResult> sizes;
-    Value operand = adaptor.operand();
+    Value operand = adaptor.getOperand();
     for (auto dim : llvm::enumerate(operandType.getShape().drop_back())) {
-      if (dim.value() != ShapedType::kDynamicSize) {
+      if (dim.value() != ShapedType::kDynamic) {
         sizes.push_back(b.getIndexAttr(dim.value()));
       } else {
         sizes.push_back(b.createOrFold<tensor::DimOp>(operand, dim.index()));
@@ -412,16 +418,16 @@ struct ReverseOpConversion : public OpConversionPattern<mhlo::ReverseOp> {
     Location loc = op.getLoc();
     SmallVector<Value> dynSizes;
     for (auto en : llvm::enumerate(ty.getShape())) {
-      if (en.value() == ShapedType::kDynamicSize) {
+      if (en.value() == ShapedType::kDynamic) {
         dynSizes.push_back(rewriter.create<tensor::DimOp>(
             loc, adaptor.getOperands()[0], en.index()));
       }
     }
-    Value initTensor = rewriter.create<linalg::InitTensorOp>(
-        loc, dynSizes, ty.getShape(), ty.getElementType());
+    Value emptyTensor = rewriter.create<tensor::EmptyOp>(
+        loc, ty.getShape(), ty.getElementType(), dynSizes);
     rewriter.replaceOpWithNewOp<IREE::LinalgExt::ReverseOp>(
-        op, op->getResultTypes(), adaptor.getOperands(), initTensor,
-        op.dimensions());
+        op, op->getResultTypes(), adaptor.getOperands(), emptyTensor,
+        op.getDimensions());
     return success();
   }
 };
@@ -436,10 +442,10 @@ struct TopkOpConversion : public OpConversionPattern<chlo::TopKOp> {
       chlo::TopKOp op, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const final {
     Location loc = op.getLoc();
-    Value operand = adaptor.operand();
+    Value operand = adaptor.getOperand();
 
     auto inputValuesType = operand.getType().dyn_cast<ShapedType>();
-    auto outputValuesType = op.values().getType().dyn_cast<ShapedType>();
+    auto outputValuesType = op.getValues().getType().dyn_cast<ShapedType>();
     auto outputIndicesType = op.getIndices().getType().dyn_cast<ShapedType>();
     if (!inputValuesType || !outputValuesType || !outputIndicesType) {
       return rewriter.notifyMatchFailure(
@@ -458,15 +464,15 @@ struct TopkOpConversion : public OpConversionPattern<chlo::TopKOp> {
     // Define the output types based on the results of CHLO TopK
     SmallVector<Value> dynSizes;
     for (auto en : llvm::enumerate(inputValuesType.getShape())) {
-      if (en.value() == ShapedType::kDynamicSize) {
-        dynSizes.push_back(
-            rewriter.create<tensor::DimOp>(loc, adaptor.operand(), en.index()));
+      if (en.value() == ShapedType::kDynamic) {
+        dynSizes.push_back(rewriter.create<tensor::DimOp>(
+            loc, adaptor.getOperand(), en.index()));
       }
     }
-    Value initTensorOutputValues = rewriter.create<mlir::linalg::InitTensorOp>(
-        loc, dynSizes, outputValuesType.getShape(), valueElementType);
-    Value initTensorOutputIndices = rewriter.create<mlir::linalg::InitTensorOp>(
-        loc, dynSizes, outputIndicesType.getShape(), indicesElementType);
+    Value emptyTensorOutputValues = rewriter.create<mlir::tensor::EmptyOp>(
+        loc, outputValuesType.getShape(), valueElementType, dynSizes);
+    Value emptyTensorOutputIndices = rewriter.create<mlir::tensor::EmptyOp>(
+        loc, outputIndicesType.getShape(), indicesElementType, dynSizes);
     // Initialize indices to 0 and values to negative infinity
     Attribute negInfAttr;
     if (auto intType = valueElementType.dyn_cast<IntegerType>()) {
@@ -483,10 +489,10 @@ struct TopkOpConversion : public OpConversionPattern<chlo::TopKOp> {
         indicesElementType, APInt::getSignedMaxValue(32));
     Value posInf = rewriter.create<arith::ConstantOp>(loc, posInfAttr);
     Value negInfTensor =
-        rewriter.create<linalg::FillOp>(loc, negInf, initTensorOutputValues)
+        rewriter.create<linalg::FillOp>(loc, negInf, emptyTensorOutputValues)
             .result();
     Value posInfTensor =
-        rewriter.create<linalg::FillOp>(loc, posInf, initTensorOutputIndices)
+        rewriter.create<linalg::FillOp>(loc, posInf, emptyTensorOutputIndices)
             .result();
 
     // Replace the CHLO TopK with LinalgExt TopK

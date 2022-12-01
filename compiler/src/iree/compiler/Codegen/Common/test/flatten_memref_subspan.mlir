@@ -164,7 +164,7 @@ func.func @load_store_alloc_static(%value : f32, %i0: index, %i1 : index, %i2: i
 //      CHECK:   %[[INDEX0:.+]] = affine.apply #[[MAP]]()[%[[I0]], %[[I1]], %[[I2]]]
 //      CHECK:   memref.store %[[VAL]], %[[ALLOC]][%[[INDEX0]]] : memref<24xf32, 3>
 //      CHECK:   %[[INDEX1:.+]] = affine.apply #[[MAP]]()[%[[I0]], %[[I1]], %[[I2]]]
-//      CHECK:   %[[LOAD:.+]] = memref.load %0[%[[INDEX1]]] : memref<24xf32, 3>
+//      CHECK:   %[[LOAD:.+]] = memref.load %[[ALLOC]][%[[INDEX1]]] : memref<24xf32, 3>
 //      CHECK:   return %[[LOAD]]
 
 // -----
@@ -356,3 +356,122 @@ func.func @static_collapse_shape_to_1d_static(%offset : index, %i: index) {
 //      CHECK:   %[[SUBSPAN:.+]] = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) offset(%arg0) : memref<?xf32>{%[[SIZE]]}
 //      CHECK:   %[[STATIC_CAST:.+]] = memref.cast %0 : memref<?xf32> to memref<336xf32>
 //      CHECK:   "unregistered.opaque"(%[[STATIC_CAST]])
+
+// -----
+
+func.func @subview(%offset : index, %i0: index, %i1: index) -> f32 {
+  %c0 = arith.constant 0 : index
+  %subspan = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) offset(%offset) : memref<32x128xf32>
+  %expand = memref.subview %subspan[%i0, %i1][16, 8][1, 1] : memref<32x128xf32> to memref<16x8xf32, strided<[128, 1], offset: ?>>
+  %value = memref.load %expand[%c0, %c0] : memref<16x8xf32, strided<[128, 1], offset: ?>>
+  return %value : f32
+}
+
+//      CHECK: #[[MAP:.+]] = affine_map<()[s0, s1, s2] -> (s0 * 128 + s1 + s2 floordiv 4)>
+//      CHECK: func.func @subview
+// CHECK-SAME: (%[[OFFSET:.+]]: index, %[[I0:.+]]: index, %[[I1:.+]]: index)
+//  CHECK-DAG:   %[[C0:.+]] = arith.constant 0 : index
+//  CHECK-DAG:   %[[SIZE:.+]] = arith.constant 4096 : index
+//      CHECK:   %[[SUBSPAN:.+]] = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) offset(%[[C0]]) : memref<?xf32>{%[[SIZE]]}
+//      CHECK:   %[[INDEX:.+]] = affine.apply #[[MAP]]()[%[[I0]], %[[I1]], %[[OFFSET]]]
+//      CHECK:   memref.load %[[SUBSPAN]][%[[INDEX]]]
+
+// -----
+
+func.func @subgroup_mma_load(%i0: index, %i1: index) -> !gpu.mma_matrix<16x16xf16, "AOp"> {
+  %alloc = memref.alloc() : memref<32x32xf16, 3>
+  %0 = gpu.subgroup_mma_load_matrix %alloc[%i0, %i1] {leadDimension = 32 : index} : memref<32x32xf16, 3> -> !gpu.mma_matrix<16x16xf16, "AOp">
+  return %0 : !gpu.mma_matrix<16x16xf16, "AOp">
+}
+
+//       CHECK: #[[$MAP:.+]] = affine_map<()[s0, s1] -> (s0 * 32 + s1)>
+// CHECK-LABEL: func.func @subgroup_mma_load
+//  CHECK-SAME: (%[[I0:.+]]: index, %[[I1:.+]]: index)
+//       CHECK:  %[[ALLOC:.+]] = memref.alloc() : memref<1024xf16, 3>
+//       CHECK:  %[[IDX:.+]] = affine.apply #[[$MAP]]()[%[[I0]], %[[I1]]]
+//       CHECK:  %[[LD:.+]] = gpu.subgroup_mma_load_matrix %[[ALLOC]][%[[IDX]]] {leadDimension = 32 : index} : memref<1024xf16, 3> -> !gpu.mma_matrix<16x16xf16, "AOp">
+//       CHECK:  return %[[LD]]
+
+// -----
+
+func.func @subgroup_mma_store(%i0: index, %i1: index, %val: !gpu.mma_matrix<16x16xf16, "COp">) {
+  %alloc = memref.alloc() : memref<32x32xf16, 3>
+  gpu.subgroup_mma_store_matrix %val, %alloc[%i0, %i1] {leadDimension = 128 : index} : !gpu.mma_matrix<16x16xf16, "COp">, memref<32x32xf16, 3>
+  return
+}
+
+//       CHECK: #[[$MAP:.+]] = affine_map<()[s0, s1] -> (s0 * 32 + s1)>
+// CHECK-LABEL: func.func @subgroup_mma_store
+//  CHECK-SAME: (%[[I0:.+]]: index, %[[I1:.+]]: index, %[[VAL:.+]]: !gpu.mma_matrix<16x16xf16, "COp">) {
+//       CHECK:   %[[ALLOC:.+]] = memref.alloc() : memref<1024xf16, 3>
+//       CHECK:   %[[IDX:.+]] = affine.apply #[[$MAP]]()[%[[I0]], %[[I1]]]
+//       CHECK:   gpu.subgroup_mma_store_matrix %[[VAL]], %[[ALLOC]][%[[IDX]]] {leadDimension = 128 : index} : !gpu.mma_matrix<16x16xf16, "COp">, memref<1024xf16, 3>
+
+// -----
+
+func.func @subgroup_mma_load_with_offset(%offset : index, %i0: index, %i1: index) -> !gpu.mma_matrix<16x16xf16, "AOp"> {
+  %subspan = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) offset(%offset) : memref<32x32xf16, 3>
+  %0 = gpu.subgroup_mma_load_matrix %subspan[%i0, %i1] {leadDimension = 32 : index} : memref<32x32xf16, 3> -> !gpu.mma_matrix<16x16xf16, "AOp">
+  return %0 : !gpu.mma_matrix<16x16xf16, "AOp">
+}
+
+//       CHECK: #[[$MAP:.+]] = affine_map<()[s0, s1, s2] -> (s0 * 32 + s1 + s2 floordiv 2)>
+// CHECK-LABEL: func.func @subgroup_mma_load_with_offset
+//  CHECK-SAME: (%[[OFFSET:.+]]: index, %[[I0:.+]]: index, %[[I1:.+]]: index)
+//   CHECK-DAG:   %[[ZERO:.+]] = arith.constant 0 : index
+//   CHECK-DAG:   %[[C1024:.+]] = arith.constant 1024 : index
+//       CHECK:   %[[SUBSPAN:.+]] = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) offset(%[[ZERO]]) : memref<?xf16, 3>{%[[C1024]]}
+//       CHECK:   %[[INDEX:.+]] = affine.apply #[[$MAP]]()[%[[I0]], %[[I1]], %[[OFFSET]]]
+//       CHECK:  %[[LD:.+]] = gpu.subgroup_mma_load_matrix %[[SUBSPAN]][%[[INDEX]]] {leadDimension = 32 : index} : memref<?xf16, 3> -> !gpu.mma_matrix<16x16xf16, "AOp">
+//       CHECK:  return %[[LD]]
+
+// -----
+
+func.func @subgroup_mma_store_with_offset(%offset : index, %i0: index, %i1: index, %val: !gpu.mma_matrix<16x16xf16, "COp">) {
+  %subspan = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) offset(%offset) : memref<32x32xf16, 3>
+  gpu.subgroup_mma_store_matrix %val, %subspan[%i0, %i1] {leadDimension = 128 : index} : !gpu.mma_matrix<16x16xf16, "COp">, memref<32x32xf16, 3>
+  return
+}
+
+//       CHECK: #[[$MAP:.+]] = affine_map<()[s0, s1, s2] -> (s0 * 32 + s1 + s2 floordiv 2)>
+// CHECK-LABEL: func.func @subgroup_mma_store_with_offset
+//  CHECK-SAME: (%[[OFFSET:.+]]: index, %[[I0:.+]]: index, %[[I1:.+]]: index, %[[VAL:.+]]: !gpu.mma_matrix<16x16xf16, "COp">
+//   CHECK-DAG:   %[[ZERO:.+]] = arith.constant 0 : index
+//   CHECK-DAG:   %[[C1024:.+]] = arith.constant 1024 : index
+//       CHECK:   %[[SUBSPAN:.+]] = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) offset(%[[ZERO]]) : memref<?xf16, 3>{%[[C1024]]}
+//       CHECK:   %[[INDEX:.+]] = affine.apply #[[$MAP]]()[%[[I0]], %[[I1]], %[[OFFSET]]]
+//       CHECK:   gpu.subgroup_mma_store_matrix %[[VAL]], %[[SUBSPAN]][%[[INDEX]]] {leadDimension = 128 : index} : !gpu.mma_matrix<16x16xf16, "COp">, memref<?xf16, 3>
+
+// -----
+
+func.func @load_uniform_buffer(%offset: index, %i0: index, %i1 : index, %i2: index) -> i32 {
+  %subspan = hal.interface.binding.subspan set(0) binding(0) type(uniform_buffer) offset(%offset) : memref<2x3x4xi32, #hal.descriptor_type<uniform_buffer>>
+  %val = memref.load %subspan[%i0, %i1, %i2] : memref<2x3x4xi32, #hal.descriptor_type<uniform_buffer>>
+  return %val: i32
+}
+
+//       CHECK: #[[$MAP:.+]] = affine_map<()[s0, s1, s2, s3] -> (s0 * 12 + s1 * 4 + s2 + s3 floordiv 4)>
+// CHECK-LABEL: func.func @load_uniform_buffer
+//  CHECK-SAME: (%[[OFFSET:.+]]: index, %[[I0:.+]]: index, %[[I1:.+]]: index, %[[I2:.+]]: index)
+//       CHECK:   %[[C0:.+]] = arith.constant 0 : index
+//       CHECK:   %[[SUBSPAN:.+]] = hal.interface.binding.subspan set(0) binding(0) type(uniform_buffer) offset(%[[C0]]) : memref<24xi32, #hal.descriptor_type<uniform_buffer>>
+//       CHECK:   %[[INDEX:.+]] = affine.apply #[[$MAP]]()[%[[I0]], %[[I1]], %[[I2]], %[[OFFSET]]]
+//       CHECK:   %[[LD:.+]] = memref.load %[[SUBSPAN]][%[[INDEX]]] : memref<24xi32, #hal.descriptor_type<uniform_buffer>>
+//       CHECK:   return %[[LD]] : i32
+
+
+// -----
+
+func.func @store_uniform_buffer(%value : i32, %offset: index, %i0: index, %i1 : index, %i2: index) {
+  %subspan = hal.interface.binding.subspan set(0) binding(0) type(uniform_buffer) offset(%offset) : memref<2x3x4xi32, #hal.descriptor_type<uniform_buffer>>
+  memref.store %value, %subspan[%i0, %i1, %i2] : memref<2x3x4xi32, #hal.descriptor_type<uniform_buffer>>
+  return
+}
+
+//       CHECK: #[[$MAP:.+]] = affine_map<()[s0, s1, s2, s3] -> (s0 * 12 + s1 * 4 + s2 + s3 floordiv 4)>
+// CHECK-LABEL: func.func @store_uniform_buffer
+//  CHECK-SAME: (%[[VAL:.+]]: i32, %[[OFFSET:.+]]: index, %[[I0:.+]]: index, %[[I1:.+]]: index, %[[I2:.+]]: index)
+//       CHECK:   %[[C0:.+]] = arith.constant 0 : index
+//       CHECK:   %[[SUBSPAN:.+]] = hal.interface.binding.subspan set(0) binding(0) type(uniform_buffer) offset(%[[C0]]) : memref<24xi32, #hal.descriptor_type<uniform_buffer>>
+//       CHECK:   %[[INDEX:.+]] = affine.apply #[[$MAP]]()[%[[I0]], %[[I1]], %[[I2]], %[[OFFSET]]]
+//       CHECK:   memref.store %[[VAL]], %[[SUBSPAN]][%[[INDEX]]] : memref<24xi32, #hal.descriptor_type<uniform_buffer>>

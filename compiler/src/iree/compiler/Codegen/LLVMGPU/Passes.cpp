@@ -60,7 +60,7 @@ static LogicalResult gpuCopyFn(OpBuilder &builder, Location loc, Value from,
       from.getType().cast<MemRefType>().getMemorySpaceAsInt() == 3 ||
       to.getType().cast<MemRefType>().getMemorySpaceAsInt() == 3;
   if (sharedMemCopy) builder.create<gpu::BarrierOp>(loc);
-  Operation *copy = createLinalgCopyOp(builder, loc, from, to);
+  Operation *copy = builder.create<memref::CopyOp>(loc, from, to);
   if (sharedMemCopy) {
     setMarker(copy, getCopyToWorkgroupMemoryMarker());
     builder.create<gpu::BarrierOp>(loc);
@@ -163,13 +163,14 @@ void addGPUMatmulSimtPassPipeline(OpPassManager &pm) {
   // distribute foreach threads
   nestedModulePM.addNestedPass<func::FuncOp>(createLLVMGPUDistribute());
 
+  nestedModulePM.addNestedPass<func::FuncOp>(createMemrefCopyToLinalgPass());
   nestedModulePM.addNestedPass<func::FuncOp>(
       createGPUDistributeSharedMemoryCopy());
   nestedModulePM.addPass(createCanonicalizerPass());
   nestedModulePM.addPass(createCSEPass());
 
   nestedModulePM.addNestedPass<func::FuncOp>(
-      createLLVMGPUReduceSharedMemoryBankConflicts());
+      createGPUReduceSharedMemoryBankConflicts());
   nestedModulePM.addNestedPass<func::FuncOp>(
       createWorkGroupSwizzle(logSwizzleTile));
   nestedModulePM.addPass(createCanonicalizerPass());
@@ -205,7 +206,7 @@ void addGPUMatmulTensorCorePassPipeline(OpPassManager &pm,
       createRemoveSingleIterationLoopPass());
   if (pipelineDepth > 1)
     nestedModulePM.addNestedPass<func::FuncOp>(
-        createLLVMGPUMultiBuffering(pipelineDepth));
+        createGPUMultiBuffering(pipelineDepth));
   nestedModulePM.addPass(createCanonicalizerPass());
   nestedModulePM.addPass(createCSEPass());
 
@@ -232,7 +233,7 @@ void addGPUMatmulTensorCorePassPipeline(OpPassManager &pm,
   nestedModulePM.addNestedPass<func::FuncOp>(createCSEPass());
   if (!llvmgpuUseMMASync) {
     nestedModulePM.addNestedPass<func::FuncOp>(
-        createLLVMGPUReduceSharedMemoryBankConflicts());
+        createGPUReduceSharedMemoryBankConflicts());
   }
 
   // Vector -> MMA ops
@@ -283,7 +284,7 @@ void addGPUTransposePassPipeline(OpPassManager &pm) {
 
   // May or may not need to reduce shared mememory conflicts
   nestedModulePM.addNestedPass<func::FuncOp>(
-      createLLVMGPUReduceSharedMemoryBankConflicts(/*paddingSizeBits=*/32));
+      createGPUReduceSharedMemoryBankConflicts(/*paddingSizeBits=*/32));
   nestedModulePM.addNestedPass<func::FuncOp>(
       createRemoveSingleIterationLoopPass());
   nestedModulePM.addPass(createCanonicalizerPass());
@@ -296,6 +297,9 @@ void addGPUWarpReductionPassPipeline(OpPassManager &pm) {
 
   nestedModulePM.addNestedPass<func::FuncOp>(
       createRemoveSingleIterationLoopPass());
+  nestedModulePM.addNestedPass<func::FuncOp>(createGPUTileReductionPass());
+  nestedModulePM.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  nestedModulePM.addNestedPass<func::FuncOp>(createCSEPass());
 
   // Linalg -> vector
   nestedModulePM.addNestedPass<func::FuncOp>(createGPUVectorizationPass(
@@ -316,6 +320,8 @@ void addGPUWarpReductionPassPipeline(OpPassManager &pm) {
       createLoopInvariantCodeMotionPass());
   nestedModulePM.addNestedPass<func::FuncOp>(createCanonicalizerPass());
   nestedModulePM.addNestedPass<func::FuncOp>(createCSEPass());
+  nestedModulePM.addNestedPass<func::FuncOp>(createForOpCanonicalizationPass());
+  nestedModulePM.addNestedPass<func::FuncOp>(createCanonicalizerPass());
 
   // vector -> simt gpu + vector
   nestedModulePM.addNestedPass<func::FuncOp>(
@@ -410,10 +416,20 @@ void addGPUTransformDialectInterpreterPasses(OpPassManager &passManager) {
       mlir::iree_compiler::createTransformDialectInterpreterPass(
           clGPUCodegenTransformDialectFileName));
 
-  // Dropping the schedule is only needed if we want to embed the transform in
-  // the module: we should drop the schedule once applied.
-  // This pass does nothing in the case where we apply a separate policy
-  // through a file.
+  // Dropping the schedule is needed:
+  //   1. if we want to embed the transform in the module: we should drop the
+  //      schedule once applied.
+  //   2. if transform.do_not_dce_operands ops are introduced.
+  passManager.addPass(createDropSchedulePass());
+}
+
+void addGPUTransformDialectJitterPasses(OpPassManager &passManager) {
+  // Give control to the transform dialect.
+  passManager.addPass(mlir::iree_compiler::createTransformDialectJitterPass());
+  // Dropping the schedule is needed:
+  //   1. if we want to embed the transform in the module: we should drop the
+  //      schedule once applied.
+  //   2. if transform.do_not_dce_operands ops are introduced.
   passManager.addPass(createDropSchedulePass());
 }
 

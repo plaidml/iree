@@ -27,8 +27,8 @@ def CPU_BufferOpsTileAndVectorize
     : I32EnumAttrCase<"CPUBufferOpsTileAndVectorize", 6>;
 def CPU_TripleTilingExpert : I32EnumAttrCase<"CPUTripleTilingExpert", 7>;
 
-def Linalg_TransformInterpCodegen
-    : I32EnumAttrCase<"TransformDialectInterpreterCodegen", 8>;
+def CPU_DataTiling
+    : I32EnumAttrCase<"CPUDataTiling", 8>;
 
 def LLVMGPU_SimpleDistribute : I32EnumAttrCase<"LLVMGPUDistribute", 9>;
 def LLVMGPU_Vectorize : I32EnumAttrCase<"LLVMGPUVectorize", 10>;
@@ -37,16 +37,25 @@ def LLVMGPU_MatmulTensorCore : I32EnumAttrCase<"LLVMGPUMatmulTensorCore", 12>;
 def LLVMGPU_TransposeSharedMem : I32EnumAttrCase<"LLVMGPUTransposeSharedMem", 13>;
 def LLVMGPU_WarpReduction : I32EnumAttrCase<"LLVMGPUWarpReduction", 14>;
 
-def SPIRV_Distribute : I32EnumAttrCase<"SPIRVDistribute", 15>;
-def SPIRV_Vectorize : I32EnumAttrCase<"SPIRVVectorize", 16>;
-def SPIRV_VectorizeToCooperativeOps
-    : I32EnumAttrCase<"SPIRVVectorizeToCooperativeOps", 17>;
-def SPIRV_VectorizeWithWorkgroupMemory
-    : I32EnumAttrCase<"SPIRVVectorizeWithWorkgroupMemory", 18>;
+def SPIRV_BaseDistribute
+    : I32EnumAttrCase<"SPIRVBaseDistribute", 15>;
+def SPIRV_BaseVectorize
+    : I32EnumAttrCase<"SPIRVBaseVectorize", 16>;
+def SPIRV_MatmulPromoteVectorize
+    : I32EnumAttrCase<"SPIRVMatmulPromoteVectorize", 17>;
+def SPIRV_CooperativeMatrixVectorize
+    : I32EnumAttrCase<"SPIRVCooperativeMatrixVectorize", 18>;
 def SPIRV_SubgroupReduce
     : I32EnumAttrCase<"SPIRVSubgroupReduce", 19>;
 
 def VMVX_Default : I32EnumAttrCase<"VMVXDefault", 20>;
+
+
+def Linalg_TransformInterpCodegen
+    : I32EnumAttrCase<"TransformDialectInterpreterCodegen", 100>;
+def Linalg_TransformJitCodegen
+    : I32EnumAttrCase<"TransformDialectJitterCodegen", 101>;
+
 def None : I32EnumAttrCase<"None", 0xff>;
 
 // EnumAttrCase for all known lowerings for ops within dispatch region
@@ -58,13 +67,17 @@ def DispatchLoweringPassPipelineEnum
                     CPU_DoubleTilingPadExpert, CPU_DoubleTilingPeelingExpert,
                     CPU_ConvTileAndDecomposeExpert, CPU_CPUAArchDoubleTilingExpert,
                     CPU_BufferOpsTileAndVectorize, CPU_TripleTilingExpert,
-                    Linalg_TransformInterpCodegen, LLVMGPU_SimpleDistribute,
+                    CPU_DataTiling, LLVMGPU_SimpleDistribute,
                     LLVMGPU_Vectorize, LLVMGPU_MatmulSimt, LLVMGPU_MatmulTensorCore,
                     LLVMGPU_TransposeSharedMem, LLVMGPU_WarpReduction,
-                    SPIRV_Distribute, SPIRV_Vectorize,
-                    SPIRV_VectorizeToCooperativeOps,
-                    SPIRV_VectorizeWithWorkgroupMemory, SPIRV_SubgroupReduce,
-                    VMVX_Default, None
+                    SPIRV_BaseDistribute, SPIRV_BaseVectorize,
+                    SPIRV_MatmulPromoteVectorize, SPIRV_CooperativeMatrixVectorize,
+                    SPIRV_SubgroupReduce,
+                    VMVX_Default,
+                    // Transform dialect based codegen
+                    Linalg_TransformInterpCodegen,
+                    Linalg_TransformJitCodegen,
+                    None
                   ]> {
   let cppNamespace = "::mlir::iree_compiler::IREE::Codegen";
   // Don't generate a C++ class! We want to use the AttrDef

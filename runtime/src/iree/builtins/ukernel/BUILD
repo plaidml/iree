@@ -12,15 +12,31 @@ package(
     licenses = ["notice"],  # Apache 2.0
 )
 
+iree_runtime_cc_library(
+    name = "static_assert",
+    hdrs = ["static_assert.h"],
+)
+
+iree_runtime_cc_library(
+    name = "exported_flag_bits",
+    hdrs = ["exported_flag_bits.h"],
+    deps = [":static_assert"],
+)
+
 # :types is the type declarations used by both the entry points and the
 # internal implementation functions.
 iree_runtime_cc_library(
-    name = "types",
+    name = "common",
+    srcs = ["common.c"],
     hdrs = [
         "common.h",
         "mmt4d_types.h",
+        "pack_types.h",
+        "unpack_types.h",
     ],
     deps = [
+        ":exported_flag_bits",
+        ":static_assert",
         "//runtime/src/iree/base:core_headers",
         "//runtime/src/iree/builtins/ukernel/arch:config",
     ],
@@ -30,13 +46,15 @@ iree_runtime_cc_library(
 iree_runtime_cc_library(
     name = "generic",
     srcs = [
-        "mmt4d_select_tile_generic.c",
+        "mmt4d_generic.c",
+        "pack_generic.c",
     ],
     hdrs = [
-        "mmt4d_select_tile_generic.h",
+        "mmt4d_generic.h",
+        "pack_generic.h",
     ],
     deps = [
-        ":types",
+        ":common",
     ],
 )
 
@@ -53,7 +71,7 @@ iree_runtime_cc_library(
         "elementwise.h",
     ],
     deps = [
-        ":types",
+        ":common",
     ],
 )
 
@@ -62,15 +80,19 @@ iree_runtime_cc_library(
     name = "ukernel",
     srcs = [
         "mmt4d.c",
+        "pack.c",
+        "unpack.c",
     ],
     hdrs = [
         "elementwise.h",
         "mmt4d.h",
+        "pack.h",
+        "unpack.h",
     ],
     deps = [
+        ":common",
         ":elementwise",
         ":generic",
-        ":types",
         "//runtime/src/iree/builtins/ukernel/arch:ukernel_arch",
     ],
 )

@@ -25,17 +25,20 @@ iree_cc_library(
     "MaliConfig.cpp"
     "NVIDIAConfig.cpp"
     "Passes.cpp"
+    "SPIRVBreakDownLargeVector.cpp"
     "SPIRVCreateFastSlowPath.cpp"
     "SPIRVDistribute.cpp"
+    "SPIRVEmulateI64.cpp"
     "SPIRVLowerExecutableTargetPass.cpp"
     "SPIRVTile.cpp"
     "SPIRVTileAndDistribute.cpp"
     "SPIRVTileAndPromote.cpp"
     "SPIRVTileAndVectorizeToCooperativeOps.cpp"
-    "SPIRVVectorToCooperativeOps.cpp"
+    "SPIRVVectorToGPUSubgroupMMAOps.cpp"
     "SPIRVVectorize.cpp"
     "SPIRVVectorizeLoadStore.cpp"
     "Utils.cpp"
+    "Verifiers.cpp"
   DEPS
     IREELinalgExtDialect
     IREELinalgExtPasses
@@ -86,6 +89,7 @@ iree_cc_library(
     MLIRTransforms
     MLIRVectorDialect
     MLIRVectorInterfaces
+    MLIRVectorToGPU
     MLIRVectorToSPIRV
     MLIRVectorTransforms
     iree::compiler::Codegen::Common

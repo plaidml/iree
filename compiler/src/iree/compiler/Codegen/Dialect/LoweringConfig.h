@@ -98,15 +98,35 @@ inline void setTranslationInfo(
 // operations.
 // ===----------------------------------------------------------------------===//
 
+/// Returns the op that carries the `lowering_config` attribute; returns nullptr
+/// if none is carrying the attribute.
+///
+/// This scans ops in top-down order and the first one carrying the attribute
+/// will be returned.
+FailureOr<Operation *> getLoweringConfigCarryingOp(
+    ArrayRef<Operation *> computeOps);
+
 /// Returns the lowering configuration set for an operation. Returns `nullptr`
 /// if no value is set.  It expects that the attribute is stored using the
 /// identifier `lowering_config`.
 IREE::Codegen::LoweringConfigAttr getLoweringConfig(Operation *op);
 
+/// Returns the lowering configuration from the list of operations; returns
+/// nullptr if unable to find.
+///
+/// This scans ops in top-down order and the first one carrying the attribute
+/// will be returned.
+FailureOr<IREE::Codegen::LoweringConfigAttr> getLoweringConfig(
+    ArrayRef<Operation *> computeOps);
+
 /// Returns the tile sizes for a particular operation if the
 /// `iree_codegen.lowering_config` attribute is set on it.
 SmallVector<int64_t> getTileSizes(Operation *op, unsigned level);
 SmallVector<Value, 4> getTileSizes(OpBuilder &b, Operation *op, unsigned level);
+
+/// Returns the number of tiling levels defined in the
+/// `iree_codegen.lowering_config` of this operation.
+unsigned getNumTileLevels(Operation *op);
 
 /// Sets the lowering configuration, overwriting existing attribute values.
 void setLoweringConfig(Operation *op, IREE::Codegen::LoweringConfigAttr config);

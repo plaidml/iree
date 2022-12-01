@@ -1,4 +1,4 @@
-// Copyright 2021 The IREE Authors
+  // Copyright 2021 The IREE Authors
 //
 // Licensed under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -10,11 +10,30 @@
 include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtBase.td"
 include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtInterfaces.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
+include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/Interfaces/TilingInterface.td"
 include "mlir/Interfaces/ViewLikeInterface.td"
 
+
+def IREELinalgExt_DoNotDCEOperandsOp :
+  Op<IREELinalgExt_Dialect, "transform.do_not_dce_operands", []> {
+  let summary = "Unfoldable op that just keeps its operands live";
+  let description = [{
+    Unfoldable op that just keeps its operands live. This is to use with the
+    transform dialect in case where transforms introduce IR that would be
+    otherwise DCE'd by canonicalizations.
+
+    This op should be added to the transform dialect in the fullness of time but
+    it can't be registered dynamically on the IREE side as that triggers errors
+    since the op does not implement any transform interface.
+  }];
+
+  let arguments = (ins Variadic<AnyType>:$operands);
+  let results = (outs);
+  let assemblyFormat = "attr-dict $operands `:` type($operands)";
+}
 
 //===----------------------------------------------------------------------===//
 // Base class.
@@ -28,17 +47,12 @@ class IREELinalgExt_Op<string mnemonic, list<Trait> traits = []> :
     IREELinalgExt_PureOp<mnemonic, !listconcat(traits,
         [AttrSizedOperandSegments,
          DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-         LinalgExtInterface,
+         DestinationStyleOpInterface, LinalgExtInterface,
          SingleBlockImplicitTerminator<"::mlir::iree_compiler::IREE::LinalgExt::YieldOp">
   ])> {
   let hasVerifier = 1;
   let hasCustomAssemblyFormat = 1;
-  code extraLinalgExtOpClassDeclaration = [{
-    SmallVector<Value> getDestinationOperands(OpBuilder &b) {
-      SmallVector<Value> dest(getOutputs().begin(), getOutputs().end());
-      return dest;
-    }
-  }];
+  code extraLinalgExtOpClassDeclaration = "";
 }
 
 //===----------------------------------------------------------------------===//
@@ -78,6 +92,11 @@ def IREELinalgExt_ScatterOp : IREELinalgExt_Op<"scatter",
     rank(%original) - index_depth values match %(originals) last dimensions,
     with the previous dims extending from the index offsets.
 
+    The dimension_map attributes describes which index value maps to which
+    dimension in the destionation. It cannot contain duplicate values, must
+    have as many entries as index depth, and values must be within the rank of
+    the destination.
+
     The unique_indices attribute carries the information whether all the indices
     are unique. If there are repeated indices, the first iteration loop will be
     marked as reduction.
@@ -89,12 +108,14 @@ def IREELinalgExt_ScatterOp : IREELinalgExt_Op<"scatter",
   let arguments = (ins
       Variadic<AnyRankedTensorOrMemRefType>:$inputs,
       Variadic<AnyRankedTensorOrMemRefType>:$outputs,
+      I64ArrayAttr:$dimension_map,
       DefaultValuedAttr<BoolAttr, "true">:$unique_indices
   );
   let results = (outs Variadic<AnyRankedTensor>:$results);
   let regions = (region AnyRegion:$region);
   let assemblyFormat = [{
-    attr-dict `unique_indices` `(` $unique_indices `)`
+    attr-dict `dimension_map` `=` $dimension_map
+              `unique_indices` `(` $unique_indices `)`
     (`ins` `(` $inputs^ `:` type($inputs) `)`)?
     `outs` `(` $outputs `:` type($outputs) `)`
     $region (`->` type($results)^)?
@@ -141,6 +162,20 @@ def IREELinalgExt_ScatterOp : IREELinalgExt_Op<"scatter",
     bool isScalarUpdate() {
       return getUpdateSliceRank() == 0;
     }
+
+    SmallVector<int64_t> dimensionMap() {
+      return extractFromI64ArrayAttr(getDimensionMap());
+    }
+
+    // Method to implement for specifying output range for
+    // DestinationStyleOpInterface
+    std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
+      std::pair<unsigned, unsigned> outputsIndexAndLength =
+        getODSOperandIndexAndLength(1);
+      return std::make_pair<int64_t, int64_t>(
+          outputsIndexAndLength.first,
+          outputsIndexAndLength.first + outputsIndexAndLength.second);
+    }
   }];
 }
 
@@ -185,6 +220,16 @@ def IREELinalgExt_SortOp : IREELinalgExt_Op<"sort",
     }
     ArrayRef<int64_t> getOperandShape() {
       return getOperandType(0).getShape();
+    }
+
+    // Method to implement for specifying output range for
+    // DestinationStyleOpInterface
+    std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
+      std::pair<unsigned, unsigned> outputsIndexAndLength =
+        getODSOperandIndexAndLength(1);
+      return std::make_pair<int64_t, int64_t>(
+          outputsIndexAndLength.first,
+          outputsIndexAndLength.first + outputsIndexAndLength.second);
     }
   }];
 }
@@ -250,6 +295,16 @@ def IREELinalgExt_FftOp : IREELinalgExt_Op<"fft", [
     int64_t getFftLength() {
       return getOperandShape().back();
     }
+
+    // Method to implement for specifying output range for
+    // DestinationStyleOpInterface
+    std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
+      std::pair<unsigned, unsigned> outputsIndexAndLength =
+        getODSOperandIndexAndLength(1);
+      return std::make_pair<int64_t, int64_t>(
+          outputsIndexAndLength.first,
+          outputsIndexAndLength.first + outputsIndexAndLength.second);
+    }
   }];
 }
 
@@ -305,6 +360,16 @@ def IREELinalgExt_ScanOp : IREELinalgExt_Op<"scan",
     int64_t getOperandRank() {
       return getOperandType().getRank();
     }
+
+    // Method to implement for specifying output range for
+    // DestinationStyleOpInterface
+    std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
+      std::pair<unsigned, unsigned> outputsIndexAndLength =
+        getODSOperandIndexAndLength(1);
+      return std::make_pair<int64_t, int64_t>(
+          outputsIndexAndLength.first,
+          outputsIndexAndLength.first + outputsIndexAndLength.second);
+    }
   }];
 }
 
@@ -358,6 +423,16 @@ def IREELinalgExt_ReverseOp : IREELinalgExt_Op<"reverse", [
         ret.push_back(elem.getLimitedValue());
       }
       return ret;
+    }
+
+    // Method to implement for specifying output range for
+    // DestinationStyleOpInterface
+    std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
+      std::pair<unsigned, unsigned> outputsIndexAndLength =
+        getODSOperandIndexAndLength(1);
+      return std::make_pair<int64_t, int64_t>(
+          outputsIndexAndLength.first,
+          outputsIndexAndLength.first + outputsIndexAndLength.second);
     }
   }];
 }
@@ -430,6 +505,16 @@ def IREELinalgExt_TopkOp : IREELinalgExt_Op<"topk",[
     int64_t getInputRank() {
       return getInputType().getRank();
     }
+
+    // Method to implement for specifying output range for
+    // DestinationStyleOpInterface
+    std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
+      std::pair<unsigned, unsigned> outputsIndexAndLength =
+        getODSOperandIndexAndLength(1);
+      return std::make_pair<int64_t, int64_t>(
+          outputsIndexAndLength.first,
+          outputsIndexAndLength.first + outputsIndexAndLength.second);
+    }
   }];
 }
 
@@ -471,9 +556,9 @@ def IREELinalgExt_PackOp : IREELinalgExt_Op<"pack", [
       inner_tiles = [8, 32] into %arg1 : (memref<128x256xf32> memref<16x8x8x32xf32>)
     ```
     Example KC_to_CKkc
-    
+
     ```mlir
-    iree_linalg_ext.pack %arg0 outer_dims_pos = [1, 0] inner_dims_pos = [0, 1] 
+    iree_linalg_ext.pack %arg0 outer_dims_perm = [1, 0] inner_dims_pos = [0, 1]
       inner_tiles = [32, 8] into %arg1 : (memref<128x256xf32> memref<32x4x32x8xf32>)
     ```
 
@@ -494,7 +579,7 @@ def IREELinalgExt_PackOp : IREELinalgExt_Op<"pack", [
   let arguments = (ins Variadic<AnyShaped>:$inputs,
     Variadic<AnyShaped>:$outputs,
     DefaultValuedOptionalAttr<I64ArrayAttr, "{}">:$outer_dims_perm,
-    DefaultValuedAttr<I64ArrayAttr, "{}">:$inner_dims_pos,
+    I64ArrayAttr:$inner_dims_pos,
     Variadic<Index>:$inner_tiles,
     I64ArrayAttr:$static_inner_tiles,
     Optional<AnyType>:$padding_value);
@@ -508,10 +593,18 @@ def IREELinalgExt_PackOp : IREELinalgExt_Op<"pack", [
     `inner_dims_pos` `=` $inner_dims_pos
     `inner_tiles` `=`
     custom<DynamicIndexList>($inner_tiles, $static_inner_tiles,
-                             "ShapedType::kDynamicSize")
+                             "ShapedType::kDynamic")
     `into` $outputs `:` `(` type($inputs) type($outputs) `)`
      (`->` type($results)^)?
   }];
+
+  let builders = [
+    OpBuilder<(ins "Value":$source, "Value":$output,
+      "ArrayRef<int64_t>":$innerDimsPos,
+      "ArrayRef<OpFoldResult>":$innerTiles,
+      CArg<"Optional<Value>", "llvm::None">:$paddingValue,
+      CArg<"ArrayRef<int64_t>", "{}">:$outerDimsPerm)>
+  ];
 
   let extraClassDeclaration = extraLinalgExtOpClassDeclaration # [{
 
@@ -566,6 +659,33 @@ def IREELinalgExt_PackOp : IREELinalgExt_Op<"pack", [
 
     // Return a mapping from positions `dims_pos` to their tile factors.
     DenseMap<int64_t, OpFoldResult> getDimAndTileMapping();
+
+    // Method to get the shape of the result as `SmallVector<OpFoldResult>`.
+    // This is a static method to allow getting the shape of the destination
+    // expected while creating a `pack` op.
+    static SmallVector<OpFoldResult> getResultShape(OpBuilder &builder,
+        Location loc, ArrayRef<OpFoldResult> sourceDims,
+        ArrayRef<OpFoldResult> innerTileDims, ArrayRef<int64_t> innerDimsPos,
+        ArrayRef<int64_t> outerDimsPerm = {});
+    // Method to return the shape of the result as `SmallVector<OpFoldResult>`.
+    SmallVector<OpFoldResult> getResultShape(OpBuilder &builder);
+
+    // Method to get the `ShapedType` of the result. This is a static method
+    // to allow getting the type of the destination while creating the `pack`
+    // op.
+    static ShapedType getPackedType(ShapedType sourceType,
+        ArrayRef<int64_t> innerTileSizes, ArrayRef<int64_t> innerDimsPos,
+        ArrayRef<int64_t> outerDimsPerm = {});
+
+    // Method to implement for specifying output range for
+    // DestinationStyleOpInterface
+    std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
+      std::pair<unsigned, unsigned> outputsIndexAndLength =
+        getODSOperandIndexAndLength(1);
+      return std::make_pair<int64_t, int64_t>(
+          outputsIndexAndLength.first,
+          outputsIndexAndLength.first + outputsIndexAndLength.second);
+    }
   }];
 }
 
@@ -575,7 +695,9 @@ def IREELinalgExt_UnPackOp : IREELinalgExt_Op<"unpack", [
   DeclareOpInterfaceMethods<TilingInterface,
     ["getIterationDomain",
      "getLoopIteratorTypes",
-     "generateScalarImplementation"]>,
+     "generateScalarImplementation",
+     "getResultTilePosition",
+     "getTiledImplementation"]>,
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]>{
   let summary = "unpack operation";
@@ -589,21 +711,21 @@ def IREELinalgExt_UnPackOp : IREELinalgExt_Op<"unpack", [
     Example KCck_to_KC:
 
     ```mlir
-    iree_linalg_ext.pack %arg0 dims_pos = [1, 0]
+    iree_linalg_ext.unpack %arg0 dims_pos = [1, 0]
       inner_tiles = [32, 8] into %arg1 : (memref<16x8x32x8xf32> memref<128x256xf32>)
     ```
 
     Example NCnc_to_NC:
 
     ```mlir
-    iree_linalg_ext.pack %arg0 dims_pos = [0, 1]
+    iree_linalg_ext.unpack %arg0 dims_pos = [0, 1]
       inner_tiles = [8, 32] into %arg1 : (memref<16x8x8x32xf32> memref<128x256xf32>)
     ```
 
     Example CKkc_to_KC:
-    
+
     ```mlir
-    iree_linalg_ext.unpack %arg1 outer_dims_pos = [1, 0] inner_dims_pos = [0, 1] 
+    iree_linalg_ext.unpack %arg1 outer_dims_perm = [1, 0] inner_dims_pos = [0, 1]
       inner_tiles = [32, 8] into %arg0 : (memref<32x4x32x8xf32> memref<128x256xf32>)
     ```
   }];
@@ -623,10 +745,17 @@ def IREELinalgExt_UnPackOp : IREELinalgExt_Op<"unpack", [
     `inner_dims_pos` `=` $inner_dims_pos
     `inner_tiles` `=`
     custom<DynamicIndexList>($inner_tiles, $static_inner_tiles,
-                             "ShapedType::kDynamicSize")
+                             "ShapedType::kDynamic")
     `into` $outputs `:` `(` type($inputs) type($outputs) `)`
      (`->` type($results)^)?
   }];
+
+  let builders = [
+    OpBuilder<(ins "Value":$source, "Value":$output,
+    "ArrayRef<int64_t>":$innerDimsPos,
+    "ArrayRef<OpFoldResult>":$innerTiles,
+    CArg<"ArrayRef<int64_t>", "{}">:$outerDimsPerm)>
+  ];
 
   let extraClassDeclaration = extraLinalgExtOpClassDeclaration # [{
 
@@ -676,6 +805,88 @@ def IREELinalgExt_UnPackOp : IREELinalgExt_Op<"unpack", [
 
     // Return a mapping from positions `dims_pos` to their tile factors.
     DenseMap<int64_t, OpFoldResult> getDimAndTileMapping();
+
+    // Method to implement for specifying output range for
+    // DestinationStyleOpInterface
+    std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
+      std::pair<unsigned, unsigned> outputsIndexAndLength =
+        getODSOperandIndexAndLength(1);
+      return std::make_pair<int64_t, int64_t>(
+          outputsIndexAndLength.first,
+          outputsIndexAndLength.first + outputsIndexAndLength.second);
+    }
+  }];
+}
+
+def IREELinalgExt_SetEncodingOp : IREELinalgExt_PureOp<"set_encoding",[
+   DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface>, Pure
+  ]> {
+  let summary = "perform pack and pad operation on source";
+  let description = [{
+    Operation to assign an encoding to a tensor. The operation
+    does not change the rank or extent of a tensor. Instead it
+    adds an encoding attribute to the tensor type to represent
+    a change in layout.
+  }];
+
+  let arguments = (ins AnyRankedTensor:$source);
+  let results = (outs AnyRankedTensor:$result);
+
+  let assemblyFormat = [{
+    attr-dict $source `:` type($source) `->` type($result)
+  }];
+
+let builders = [
+    OpBuilder<(ins "Value":$source, "TensorEncoding":$encoding)>
+  ];
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    RankedTensorType getSourceType() {
+      return getSource().getType().cast<RankedTensorType>();
+    }
+    RankedTensorType getResultType() {
+      return getResult().getType().cast<RankedTensorType>();
+    }
+    TensorEncoding getResultTensorEncoding() {
+      return getResultType().getEncoding().cast<EncodingAttr>()
+          .getEncoding().getValue();
+    }
+  }];
+}
+
+def IREELinalgExt_UnsetEncodingOp : IREELinalgExt_PureOp<"unset_encoding", [
+    DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface>, Pure
+  ]> {
+  let summary = "perfom unpack and extract operation on source";
+  let description = [{
+    Operation to convert an tensor with encoding that represents
+    its data layout into a tensor with default layout (i.e. no encoding).
+    For now in IREE the default layout is row-major.
+  }];
+  let arguments = (ins AnyRankedTensor:$source);
+  let results = (outs AnyRankedTensor:$result);
+
+  let assemblyFormat = [{
+    attr-dict $source `:` type($source) `->` type($result)
+  }];
+
+let builders = [
+    OpBuilder<(ins "Value":$source)>
+  ];
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    RankedTensorType getSourceType() {
+      return getSource().getType().cast<RankedTensorType>();
+    }
+    RankedTensorType getResultType() {
+      return getResult().getType().cast<RankedTensorType>();
+    }
+    TensorEncoding getSourceTensorEncoding() {
+      return getSourceType().getEncoding().cast<EncodingAttr>()
+          .getEncoding().getValue();
+    }
   }];
 }
 
@@ -683,7 +894,7 @@ def IREELinalgExt_UnPackOp : IREELinalgExt_Op<"unpack", [
 // Pure ops
 //===----------------------------------------------------------------------===//
 
-def IREELinalgExt_YieldOp : IREELinalgExt_PureOp<"yield", [NoSideEffect, ReturnLike, Terminator]> {
+def IREELinalgExt_YieldOp : IREELinalgExt_PureOp<"yield", [Pure, ReturnLike, Terminator]> {
   let summary = "LinalgExt yield op";
   let description = [{
     `iree_linalg_ext.yield` is a special terminator operation for blocks inside

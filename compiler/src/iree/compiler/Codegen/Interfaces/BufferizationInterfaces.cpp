@@ -14,10 +14,9 @@
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
-#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
-#include "mlir/Dialect/Bufferization/Transforms/AllocTensorElimination.h"
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/Transforms/OneShotAnalysis.h"
+#include "mlir/Dialect/Bufferization/Transforms/Transforms.h"
 #include "mlir/Dialect/Linalg/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"
@@ -36,7 +35,7 @@ using mlir::bufferization::BufferizableOpInterface;
 using mlir::bufferization::BufferizationAliasInfo;
 using mlir::bufferization::BufferizationOptions;
 using mlir::bufferization::DialectAnalysisState;
-using mlir::bufferization::eliminateAllocTensors;
+using mlir::bufferization::eliminateEmptyTensors;
 using mlir::bufferization::OneShotBufferizationOptions;
 using mlir::bufferization::replaceOpWithBufferizedValues;
 using mlir::bufferization::replaceOpWithNewBufferizedOp;
@@ -48,12 +47,11 @@ namespace iree_compiler {
 // Utility functions.
 //===----------------------------------------------------------------------===//
 
-template <typename TensorType>
-static MemRefType getMemrefTypeForTensor(TensorType tensorType,
-                                         MemRefLayoutAttrInterface layout = {},
-                                         Attribute memorySpace = {}) {
-  return MemRefType::get(tensorType.getShape(), tensorType.getElementType(),
-                         layout, memorySpace);
+static MemRefType getMemrefTypeForTensor(
+    IREE::Flow::DispatchTensorType tensorType,
+    MemRefLayoutAttrInterface layout = {}, Attribute memorySpace = {}) {
+  return MemRefType::get(tensorType.getShape(),
+                         tensorType.getBoundElementType(), layout, memorySpace);
 }
 
 /// Find the memref version of the given InterfaceBindingSubspanOp. If no such
@@ -236,23 +234,29 @@ struct DispatchTensorStoreOpInterface
 static LogicalResult bufferizeLinalgExtOp(RewriterBase &rewriter,
                                           IREE::LinalgExt::LinalgExtOp op,
                                           const BufferizationOptions &options) {
+  auto dspOp = dyn_cast<DestinationStyleOpInterface>(op.getOperation());
+  if (!dspOp) {
+    return op->emitOpError(
+        "expected op to implement the `DestinationStyleOpInterface`");
+  }
+
   // Take a guard before anything else.
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(op);
 
   // Nothing to do. This op is already bufferized.
-  if (op.hasBufferSemantics()) return success();
+  if (dspOp.hasBufferSemantics()) return success();
 
   // Ensure op has only tensors. Allow mixed tensor-buffer mode on a per-need
   // basis.
-  if (!op.hasTensorSemantics())
+  if (!dspOp.hasTensorSemantics())
     return op->emitError() << "op does not have tensor semantics";
 
   // New input operands for the cloned op.
   SmallVector<Value> newInputBuffers;
   newInputBuffers.reserve(op.getNumInputs());
   for (OpOperand *opOperand : op.getInputOperands()) {
-    if (op.isScalar(opOperand)) {
+    if (dspOp.isScalar(opOperand)) {
       newInputBuffers.push_back(opOperand->get());
       continue;
     }
@@ -289,7 +293,7 @@ static LogicalResult bufferizeLinalgExtOp(RewriterBase &rewriter,
   // Clone the op, but use the new operands. Move the existing block into the
   // new op. Since the new op does not have any tensor results, it does not
   // return anything.
-  auto newOp = cast<IREE::LinalgExt::LinalgExtOp>(op.cloneWithoutRegions(
+  auto newOp = cast<IREE::LinalgExt::LinalgExtOp>(dspOp.cloneWithoutRegions(
       rewriter, op.getLoc(), /*resultTypes=*/TypeRange{}, newOperands));
   int64_t numRegions = op->getNumRegions();
   for (int64_t i = 0; i < numRegions; ++i) {
@@ -336,11 +340,10 @@ struct LinalgExtOpInterface
 
   SmallVector<OpResult> getAliasingOpResult(Operation *op, OpOperand &opOperand,
                                             const AnalysisState &state) const {
-    auto linalgExtOp = cast<IREE::LinalgExt::LinalgExtOp>(op);
+    auto dspOp = cast<DestinationStyleOpInterface>(op);
 
     // The i-th "out" tensor may alias with the i-th OpResult.
-    if (linalgExtOp.isOutputTensor(&opOperand))
-      return {linalgExtOp.getTiedOpResult(&opOperand)};
+    if (dspOp.isDpsInit(&opOperand)) return {dspOp.getTiedOpResult(&opOperand)};
     return {};
   }
 
@@ -380,16 +383,17 @@ static bool isValueEquivalentToAnInplaceTensorLoadOp(
   return foundOp;
 }
 
-/// Try to eliminate InitTensorOps that are eventually fed into a
-/// DispatchTensorStoreOp. Such InitTensorOps are replaced with matching
+/// Try to eliminate tensor::EmptyOps that are eventually fed into a
+/// DispatchTensorStoreOp. Such tensor::EmptyOps are replaced with matching
 /// DispatchTensorLoadOps. Two conditions must be met:
 ///
 /// * The target must be a "readwrite" tensor.
 /// * All ops along the reverse SSA use-def chain from the
-///   DispatchTensorStoreOp to the InitTensorOp must have bufferized in-place.
-LogicalResult storeTensorOpAnchoredInitTensorEliminationStep(
+///   DispatchTensorStoreOp to the tensor::EmptyOp must have bufferized
+///   in-place.
+LogicalResult storeTensorOpAnchoredEmptyTensorEliminationStep(
     RewriterBase &rewriter, Operation *op, AnalysisState &state) {
-  return eliminateAllocTensors(
+  return eliminateEmptyTensors(
       rewriter, op, state,
       /*anchorMatchFunc=*/
       [&](OpOperand &operand, SmallVector<Value> &) {
@@ -432,6 +436,8 @@ void registerBufferizationInterfaces(DialectRegistry &registry) {
             LinalgExtOpInterface<IREE::LinalgExt::FftOp>>(*ctx);
         IREE::LinalgExt::PackOp::attachInterface<
             LinalgExtOpInterface<IREE::LinalgExt::PackOp>>(*ctx);
+        IREE::LinalgExt::UnPackOp::attachInterface<
+            LinalgExtOpInterface<IREE::LinalgExt::UnPackOp>>(*ctx);
         IREE::LinalgExt::ReverseOp::attachInterface<
             LinalgExtOpInterface<IREE::LinalgExt::ReverseOp>>(*ctx);
         IREE::LinalgExt::ScanOp::attachInterface<

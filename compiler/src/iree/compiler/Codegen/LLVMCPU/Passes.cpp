@@ -47,9 +47,29 @@ static llvm::cl::opt<bool> clEnableHoistPadding(
     "iree-llvmcpu-enable-hoist-padding",
     llvm::cl::desc("Flag to enable hoist padding"), llvm::cl::init(false));
 
+// TODO(#10820): Delete the flag. This should be a nop pass to default pipeline
+// while tensor.pad op is lowered to fill + insert_slice before Codegen.
+// However, it causes regressions in terms of compilation time. Skip the passes
+// for now.
+static llvm::cl::opt<bool> clEnablePadConsumerFusion(
+    "iree-llvmcpu-enable-pad-consumer-fusion",
+    llvm::cl::desc("Flag to enable the fusion for pad + consumer"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<bool> clEnableMicrokernels(
     "iree-vmvx-enable-microkernels",
     llvm::cl::desc("Enables microkernel lowering for vmvx (experimental)"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> clEnableMicrokernelsDecomposeLinalgGeneric(
+    "iree-vmvx-enable-microkernels-decompose-linalg-generic",
+    llvm::cl::desc("Enables decomposition of linalg.generic ops when "
+                   "microkernels are enabled (experimental)"),
+    llvm::cl::init(true));
+
+static llvm::cl::opt<bool> clEnableReassociateFpReductions(
+    "iree-llvmcpu-reassociate-fp-reductions",
+    llvm::cl::desc("Enables reassociation for FP reductions"),
     llvm::cl::init(false));
 
 // MLIR file containing a top-level module that specifies the transformations to
@@ -107,7 +127,7 @@ static void addTileAndDistributePasses(
     OpPassManager &pm, bool useFuseTensorPadWithConsumerPass = true) {
   pm.addPass(createTileAndDistributeToWorkgroupsPass());
   auto &nestedModulePM = pm.nest<ModuleOp>();
-  if (useFuseTensorPadWithConsumerPass) {
+  if (clEnablePadConsumerFusion && useFuseTensorPadWithConsumerPass) {
     nestedModulePM.addNestedPass<func::FuncOp>(
         createFuseTensorPadWithConsumerPass());
   }
@@ -414,7 +434,7 @@ void addVMVXDefaultPassPipeline(OpPassManager &passManager) {
   // Tensor-level micro-kernel optimizations.
   // Note that this must be done post-tiling because it changes the structure
   // of the dispatch region such that tiling is not always possible.
-  if (clEnableMicrokernels) {
+  if (clEnableMicrokernels && clEnableMicrokernelsDecomposeLinalgGeneric) {
     passManager.nest<ModuleOp>().nest<func::FuncOp>().addPass(
         createDecomposeLinalgGenericPass());
   }
@@ -442,17 +462,28 @@ void addMultiTilingExpertPassPipeline(OpPassManager &passManager,
   OpPassManager &nestedModulePM = passManager.nest<ModuleOp>();
   {
     LinalgFusePassOptions options;
-    for (int64_t i = 1; i < numLevels; ++i) {
+    // Run SplitReductionPass before the final reduction Fuse pass, because
+    // SplitReductionPass takes care of banked-tiling.
+    for (int64_t i = 1; i < numLevels - 1; ++i) {
       options.tilingLevel = i;
       nestedModulePM.addNestedPass<func::FuncOp>(createLinalgFusePass(options));
     }
   }
+  nestedModulePM.addNestedPass<func::FuncOp>(
+      createLinalgSplitReductionPass(clEnableReassociateFpReductions));
+  {
+    LinalgFusePassOptions options;
+    options.tilingLevel = numLevels - 1;
+    nestedModulePM.addNestedPass<func::FuncOp>(createLinalgFusePass(options));
+  }
 
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createFuseTensorPadWithConsumerPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createConcretizePadResultShapePass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createVectorizePadPass());
+  if (clEnablePadConsumerFusion) {
+    nestedModulePM.addNestedPass<func::FuncOp>(
+        createFuseTensorPadWithConsumerPass());
+    nestedModulePM.addNestedPass<func::FuncOp>(
+        createConcretizePadResultShapePass());
+    nestedModulePM.addNestedPass<func::FuncOp>(createVectorizePadPass());
+  }
 
   {
     LinalgSingleTilingExpertPassOptions options;
@@ -509,11 +540,13 @@ void addConvTileAndDecomposeExpertPassPipeline(OpPassManager &passManager) {
     nestedModulePM.addNestedPass<func::FuncOp>(createCSEPass());
   }
 
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createFuseTensorPadWithConsumerPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createConcretizePadResultShapePass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createVectorizePadPass());
+  if (clEnablePadConsumerFusion) {
+    nestedModulePM.addNestedPass<func::FuncOp>(
+        createFuseTensorPadWithConsumerPass());
+    nestedModulePM.addNestedPass<func::FuncOp>(
+        createConcretizePadResultShapePass());
+    nestedModulePM.addNestedPass<func::FuncOp>(createVectorizePadPass());
+  }
 
   // Add the sandbox single tiling expert to vectorize.
   // We can't do the vectorization in the tiling expert above due to an issue in
@@ -559,6 +592,10 @@ void addCPUAArchDoubleTilingExpertPassPipeline(OpPassManager &passManager) {
     nestedModulePM.addNestedPass<func::FuncOp>(createLinalgFusePass(options));
   }
 
+  // Run SplitReductionPass before the final reduction Fuse pass, because
+  // SplitReductionPass takes care of banked-tiling.
+  nestedModulePM.addNestedPass<func::FuncOp>(
+      createLinalgSplitReductionPass(clEnableReassociateFpReductions));
   {
     LinalgSingleTilingExpertPassOptions options;
     options.tilingLevel =
@@ -567,11 +604,13 @@ void addCPUAArchDoubleTilingExpertPassPipeline(OpPassManager &passManager) {
         createLinalgSingleTilingExpertPass(options));
   }
 
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createFuseTensorPadWithConsumerPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createConcretizePadResultShapePass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createVectorizePadPass());
+  if (clEnablePadConsumerFusion) {
+    nestedModulePM.addNestedPass<func::FuncOp>(
+        createFuseTensorPadWithConsumerPass());
+    nestedModulePM.addNestedPass<func::FuncOp>(
+        createConcretizePadResultShapePass());
+    nestedModulePM.addNestedPass<func::FuncOp>(createVectorizePadPass());
+  }
 
   {
     LinalgSingleTilingExpertPassOptions options;
@@ -588,15 +627,27 @@ void addCPUAArchDoubleTilingExpertPassPipeline(OpPassManager &passManager) {
       createOptimizeVectorTransferPass(/*flatten=*/true));
 }
 
+void addCPUDataTilingPipeline(OpPassManager &passManager) {
+  addTileAndDistributePasses(passManager);
+  OpPassManager &nestedModulePM = passManager.nest<ModuleOp>();
+  nestedModulePM.addNestedPass<func::FuncOp>(
+      IREE::LinalgExt::createLinalgExtVectorizationPass());
+  addBufferizePasses(nestedModulePM);
+  nestedModulePM.addNestedPass<func::FuncOp>(
+      createSplitFullPartialTransferPass("linalg-copy"));
+}
+
 void addCPUDefaultPassPipeline(OpPassManager &passManager) {
   addTileAndDistributePasses(passManager);
   OpPassManager &nestedModulePM = passManager.nest<ModuleOp>();
   addBufferizePasses(nestedModulePM);
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createFuseTensorPadWithConsumerPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createConcretizePadResultShapePass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createVectorizePadPass());
+  if (clEnablePadConsumerFusion) {
+    nestedModulePM.addNestedPass<func::FuncOp>(
+        createFuseTensorPadWithConsumerPass());
+    nestedModulePM.addNestedPass<func::FuncOp>(
+        createConcretizePadResultShapePass());
+    nestedModulePM.addNestedPass<func::FuncOp>(createVectorizePadPass());
+  }
 }
 
 void addTransformDialectInterpreterPasses(OpPassManager &passManager) {
@@ -604,11 +655,20 @@ void addTransformDialectInterpreterPasses(OpPassManager &passManager) {
   passManager.addPass(
       mlir::iree_compiler::createTransformDialectInterpreterPass(
           clCPUCodegenTransformDialectFileName));
+  // Dropping the schedule is needed:
+  //   1. if we want to embed the transform in the module: we should drop the
+  //      schedule once applied.
+  //   2. if transform.do_not_dce_operands ops are introduced.
+  passManager.addPass(createDropSchedulePass());
+}
 
-  // Dropping the schedule is only needed if we want to embed the transform in
-  // the module: we should drop the schedule once applied.
-  // This pass does nothing in the case where we apply a separate policy
-  // through a file.
+void addTransformDialectJitterPasses(OpPassManager &passManager) {
+  // Give control to the transform dialect.
+  passManager.addPass(mlir::iree_compiler::createTransformDialectJitterPass());
+  // Dropping the schedule is needed:
+  //   1. if we want to embed the transform in the module: we should drop the
+  //      schedule once applied.
+  //   2. if transform.do_not_dce_operands ops are introduced.
   passManager.addPass(createDropSchedulePass());
 }
 
@@ -649,7 +709,7 @@ static void addLowerToLLVMPasses(OpPassManager &passManager) {
   // (HAL, IREE, Linalg, CF) -> LLVM
   passManager.addNestedPass<func::FuncOp>(arith::createArithExpandOpsPass());
   passManager.addNestedPass<func::FuncOp>(memref::createExpandOpsPass());
-  passManager.addPass(createConvertToLLVMPass());
+  passManager.addPass(createConvertToLLVMPass(clEnableReassociateFpReductions));
   passManager.addPass(createReconcileUnrealizedCastsPass());
 
   // We rely on MLIR symbol visibility being correct after this point and need
@@ -665,6 +725,8 @@ void buildLLVMCPUCodegenPassPipeline(OpPassManager &passManager) {
       createVerifyLinalgTransformLegalityPass());
   passManager.nest<ModuleOp>().addNestedPass<func::FuncOp>(
       createTypePropagationPass());
+  passManager.nest<ModuleOp>().addNestedPass<func::FuncOp>(
+      createIREEMaterializeEncodingPass());
   passManager.addNestedPass<ModuleOp>(createBufferizeCopyOnlyDispatchesPass());
 
   passManager.addPass(createLLVMCPULowerExecutableTargetPass());
@@ -688,10 +750,11 @@ void buildLLVMCPULinkingPassPipeline(OpPassManager &passManager) {
   passManager.addNestedPass<IREE::HAL::ExecutableOp>(
       mlir::createCanonicalizerPass());
 
-  // Assign final executable constant ordinals.
-  passManager.nest<IREE::HAL::ExecutableOp>()
-      .addNestedPass<IREE::HAL::ExecutableVariantOp>(
-          createLLVMCPUAssignConstantOrdinalsPass());
+  // Assign final executable constant and import ordinals.
+  auto &variantPM = passManager.nest<IREE::HAL::ExecutableOp>()
+                        .nest<IREE::HAL::ExecutableVariantOp>();
+  variantPM.addPass(createLLVMCPUAssignConstantOrdinalsPass());
+  variantPM.addPass(createLLVMCPUAssignImportOrdinalsPass());
 }
 
 }  // namespace iree_compiler

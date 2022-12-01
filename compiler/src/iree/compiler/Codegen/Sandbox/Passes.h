@@ -38,19 +38,21 @@ std::unique_ptr<OperationPass<func::FuncOp>> createLinalgFusePass();
 std::unique_ptr<OperationPass<func::FuncOp>> createLinalgFusePass(
     const LinalgFusePassOptions &options);
 
+/// Creates a pass to perform SplitReduction transformations of `LinalgOp`s.
+std::unique_ptr<OperationPass<func::FuncOp>> createLinalgSplitReductionPass(
+    bool enableReassociateFpReductions = false, int64_t size = 0);
+
 /// Struct to control pass options for `LinalgSingleTilingExpert` pass.
 struct LinalgSingleTilingExpertPassOptions {
   std::string anchorFuncOpName = "";
   std::string anchorOpName = "";
   SmallVector<int64_t> tileSizes = {};
   SmallVector<int64_t> tileInterchange = {};
-  SmallVector<int64_t> peeledLoops = {};
   bool pad = false;
   SmallVector<std::string> paddingValues = {};
   SmallVector<int64_t> packPaddings = {};
   SmallVector<int64_t> hoistPaddings = {};
   SmallVector<std::string> transposePaddings = {};
-  bool scalarizeDynamicDims = false;
   bool generalize = false;
   SmallVector<int64_t> iteratorInterchange = {};
   bool decomposeToLowerDimOp = false;

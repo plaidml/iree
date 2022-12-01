@@ -81,6 +81,7 @@ iree_compiler_cc_library(
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:TensorDialect",
         "@llvm-project//mlir:TransformUtils",
+        "@llvm-project//mlir:ViewLikeInterface",
     ],
 )
 
@@ -104,6 +105,14 @@ iree_gentbl_cc_library(
 iree_gentbl_cc_library(
     name = "StreamInterfacesGen",
     tbl_outs = [
+        (
+            ["--gen-attr-interface-decls"],
+            "StreamAttrInterfaces.h.inc",
+        ),
+        (
+            ["--gen-attr-interface-defs"],
+            "StreamAttrInterfaces.cpp.inc",
+        ),
         (
             ["--gen-op-interface-decls"],
             "StreamOpInterfaces.h.inc",

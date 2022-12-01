@@ -23,11 +23,14 @@ endif()
     inline = True,
 )
 
-# TODO: restore reduction.mlir test
 iree_lit_test_suite(
     name = "lit",
     srcs = [
+        "reduction.mlir",
         "softmax.mlir",
+        "softmax_v2.mlir",
+        # First few ops of softmax only, acts as a proxy example.
+        "softmax_partial.mlir",
     ],
     cfg = "//tests:lit.cfg.py",
     # transform dialect spec files are MLIR files that specify a transformation,
@@ -35,10 +38,15 @@ iree_lit_test_suite(
     data = [
         "reduction_codegen_spec.mlir",
         "softmax_codegen_spec.mlir",
-        # FIXME: This cannot be retired yet as there is some writeonly vs readwrite
-        # issue and we even end up emitting out of bounds accesses.
+        "softmax_v2_codegen_spec.mlir",
+        #
+        # FIXME: This must be used with the custom dispatch region formation
+        # because IREE's does not fuse the 6 ops softmax version even with
+        # --iree-flow-enable-aggressive-fusion.
+        #
         "softmax_dispatch_spec.mlir",
-        "softmax_fused_codegen_spec.mlir",
+        # First few ops of softmax only, acts as a proxy example.
+        "softmax_partial_codegen_spec.mlir",
     ],
     tags = [
         # CUDA cuInit fails with sanitizer on.

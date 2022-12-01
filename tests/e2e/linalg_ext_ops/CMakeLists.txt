@@ -16,6 +16,7 @@ iree_check_single_backend_test_suite(
   SRCS
     "reverse.mlir"
     "scan.mlir"
+    "scatter.mlir"
     "sort.mlir"
     "top-k.mlir"
   TARGET_BACKEND
@@ -75,8 +76,10 @@ iree_check_single_backend_test_suite(
     "pack.mlir"
     "reverse.mlir"
     "scan.mlir"
+    "scatter.mlir"
     "sort.mlir"
     "top-k.mlir"
+    "unpack.mlir"
   TARGET_BACKEND
     "llvm-cpu"
   DRIVER
@@ -85,12 +88,30 @@ iree_check_single_backend_test_suite(
 
 iree_check_single_backend_test_suite(
   NAME
+    check_vmvx_ukernel_local-task
+  SRCS
+    "pack.mlir"
+    "unpack.mlir"
+  TARGET_BACKEND
+    "vmvx"
+  DRIVER
+    "local-task"
+  COMPILER_FLAGS
+    "--iree-vmvx-enable-microkernels"
+    "--iree-vmvx-enable-microkernels-decompose-linalg-generic=false"
+)
+
+iree_check_single_backend_test_suite(
+  NAME
     check_vmvx_local-task
   SRCS
+    "pack.mlir"
     "reverse.mlir"
     "scan.mlir"
+    "scatter.mlir"
     "sort.mlir"
     "top-k.mlir"
+    "unpack.mlir"
   TARGET_BACKEND
     "vmvx"
   DRIVER
@@ -102,6 +123,7 @@ iree_check_single_backend_test_suite(
     check_vulkan-spirv_vulkan
   SRCS
     "reverse.mlir"
+    "scatter.mlir"
     "sort.mlir"
   TARGET_BACKEND
     "vulkan-spirv"

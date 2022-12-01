@@ -7,7 +7,7 @@ func.func @reduce() -> (!out_tensor_t) {
   // Note: arith.constant is good for our purposes here but it may be useful to use
   // util.unfoldable_constant.
   %arg = arith.constant dense<1.0> : !in_tensor_t
-  %0 = linalg.init_tensor [8] : !out_tensor_t
+  %0 = tensor.empty() : !out_tensor_t
   %1 = linalg.fill ins(%cst : f32) outs(%0 : !out_tensor_t) ->   !out_tensor_t
   %2 = linalg.generic {
     indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
@@ -26,12 +26,28 @@ func.func @reduce() -> (!out_tensor_t) {
 // RUN:     --iree-flow-transformation-pipeline  \
 // RUN:     --iree-stream-transformation-pipeline \
 // RUN:     --iree-hal-configuration-pipeline | \
-// RUN: iree-opt --pass-pipeline='hal.executable(hal.executable.variant(iree-llvmgpu-lower-executable-target-pass))' \
+// RUN: iree-opt --pass-pipeline='builtin.module(hal.executable(hal.executable.variant(iree-llvmgpu-lower-executable-target)))' \
 // RUN:     --iree-codegen-llvmgpu-use-transform-dialect=%p/reduction_codegen_spec.mlir | \
+// RUN: FileCheck %s --check-prefix=CHECK
+
+/// Note: the current --iree-codegen-llvmgpu-enable-transform-dialect-jit only works for exactly this softmax atm.
+// RUN: iree-opt %s --iree-hal-target-backends=cuda \
+// RUN:     --iree-abi-transformation-pipeline \
+// RUN:     --iree-flow-transformation-pipeline  \
+// RUN:     --iree-stream-transformation-pipeline \
+// RUN:     --iree-hal-configuration-pipeline | \
+// RUN: iree-opt --pass-pipeline='builtin.module(hal.executable(hal.executable.variant(iree-llvmgpu-lower-executable-target)))' \
+// RUN:     --iree-codegen-llvmgpu-enable-transform-dialect-jit | \
 // RUN: FileCheck %s --check-prefix=CHECK
 
 // RUN: iree-compile %s --iree-hal-target-backends=cuda \
 // RUN:     --iree-codegen-llvmgpu-use-transform-dialect=%p/reduction_codegen_spec.mlir | \
+// RUN: iree-run-module --entry_function=reduce --device=cuda |\
+// RUN: FileCheck %s --check-prefix=EXEC
+
+/// Note: the current --iree-codegen-llvmgpu-enable-transform-dialect-jit only works for exactly this softmax atm.
+// RUN: iree-compile %s --iree-hal-target-backends=cuda \
+// RUN:     --iree-codegen-llvmgpu-enable-transform-dialect-jit | \
 // RUN: iree-run-module --entry_function=reduce --device=cuda |\
 // RUN: FileCheck %s --check-prefix=EXEC
 

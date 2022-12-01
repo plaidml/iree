@@ -52,7 +52,7 @@ static llvm::SmallVector<utils::IteratorType> getIteratorTypesFromAttr(
     ArrayAttr iteratorTypesAttr) {
   return llvm::to_vector(llvm::map_range(iteratorTypesAttr, [](Attribute attr) {
     return utils::symbolizeIteratorType(attr.cast<StringAttr>().getValue())
-        .getValue();
+        .value();
   }));
 }
 
@@ -209,6 +209,8 @@ void registerPartitionableLoopsInterfaceModels(DialectRegistry &registry) {
     IREE::LinalgExt::FftOp::attachInterface<FftOpPartitionableLoops>(*ctx);
     IREE::LinalgExt::PackOp::attachInterface<
         OuterParallelAsPartitionableLoops<IREE::LinalgExt::PackOp>>(*ctx);
+    IREE::LinalgExt::UnPackOp::attachInterface<
+        NoPartitionableLoops<IREE::LinalgExt::UnPackOp>>(*ctx);
     IREE::LinalgExt::ScanOp::attachInterface<
         AllParallelAsPartitionableLoops<IREE::LinalgExt::ScanOp>>(*ctx);
     IREE::LinalgExt::ScatterOp::attachInterface<

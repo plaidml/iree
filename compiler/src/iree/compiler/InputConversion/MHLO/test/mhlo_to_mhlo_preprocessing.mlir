@@ -198,13 +198,13 @@ func.func @reorder_in_dim_2d_unary(%arg0: tensor<2x4xf32>) -> tensor<3x2x4xf32> 
 
 // CHECK: @reorder_broadcast_in_dim_scalar_unary_diff_type(%[[ARG0:.*]]: tensor<complex<f32>>) -> (tensor<1x8x8x64xf32>, tensor<1x8x8x64xf32>)
 func.func @reorder_broadcast_in_dim_scalar_unary_diff_type(%arg0: tensor<complex<f32>>) -> (tensor<1x8x8x64xf32>, tensor<1x8x8x64xf32>) {
-  // CHECK: %[[REAL:.*]] = mhlo.real(%[[ARG0]]) : (tensor<complex<f32>>) -> tensor<f32>
+  // CHECK: %[[REAL:.*]] = mhlo.real %[[ARG0]] : (tensor<complex<f32>>) -> tensor<f32>
   // CHECK: "mhlo.broadcast_in_dim"(%[[REAL]]) {broadcast_dimensions = dense<> : tensor<0xi64>} : (tensor<f32>) -> tensor<1x8x8x64xf32>
-  // CHECK: %[[IMAG:.*]] = mhlo.imag(%[[ARG0]]) : (tensor<complex<f32>>) -> tensor<f32>
+  // CHECK: %[[IMAG:.*]] = mhlo.imag %[[ARG0]] : (tensor<complex<f32>>) -> tensor<f32>
   // CHECK: "mhlo.broadcast_in_dim"(%[[IMAG]]) {broadcast_dimensions = dense<> : tensor<0xi64>} : (tensor<f32>) -> tensor<1x8x8x64xf32>
   %0 = "mhlo.broadcast_in_dim"(%arg0) {broadcast_dimensions = dense<[]> : tensor<0xi64>} : (tensor<complex<f32>>) -> tensor<1x8x8x64xcomplex<f32>>
-  %1 = mhlo.real(%0) : (tensor<1x8x8x64xcomplex<f32>>) -> tensor<1x8x8x64xf32>
-  %2 = mhlo.imag(%0) : (tensor<1x8x8x64xcomplex<f32>>) -> tensor<1x8x8x64xf32>
+  %1 = mhlo.real %0 : (tensor<1x8x8x64xcomplex<f32>>) -> tensor<1x8x8x64xf32>
+  %2 = mhlo.imag %0 : (tensor<1x8x8x64xcomplex<f32>>) -> tensor<1x8x8x64xf32>
   return %1, %2: tensor<1x8x8x64xf32>, tensor<1x8x8x64xf32>
 }
 
@@ -245,108 +245,24 @@ func.func @rng_normal(%arg0: tensor<f32>, %arg1: tensor<f32>) -> tensor<3x5xf32>
 
 // -----
 
-func.func @scatter_implicit_batch(%arg0: tensor<5x5xi32>, %arg1: tensor<2xi32>, %arg2: tensor<i32>) -> tensor<5x5xi32> {
-  %0 = "mhlo.scatter"(%arg0, %arg1, %arg2) ({
-  ^bb0(%arg3: tensor<i32>, %arg4: tensor<i32>):
-    "mhlo.return"(%arg4) : (tensor<i32>) -> ()
-  }) {indices_are_sorted = true, scatter_dimension_numbers = #mhlo.scatter<inserted_window_dims = [0, 1], scatter_dims_to_operand_dims = [0, 1]>, unique_indices = true} : (tensor<5x5xi32>, tensor<2xi32>, tensor<i32>) -> tensor<5x5xi32>
-  return %0 : tensor<5x5xi32>
-}
-
-// CHECK-LABEL: func.func @scatter_implicit_batch
-// CHECK-DAG: %[[RE_I:.+]] = tensor.expand_shape %{{.*}} {{\[\[}}0, 1]] : tensor<2xi32> into tensor<1x2xi32>
-// CHECK-DAG: %[[RE_U:.+]] = tensor.expand_shape %{{.*}} [] : tensor<i32> into tensor<1xi32>
-// CHECK:     %[[SCATTER:.+]] = "mhlo.scatter"(%{{.*}}, %[[RE_I]], %[[RE_U]])
-// CHECK:       mhlo.return %{{.*}}
-
-// -----
-
-func.func @scatter_implicit_indices(%arg0: tensor<17x11xf32>,
-  %arg1: tensor<7xi32>, %arg2: tensor<7x11xf32>) -> tensor<17x11xf32> {
-  %0 = "mhlo.scatter"(%arg0, %arg1, %arg2) ({
-  ^bb0(%arg3: tensor<f32>, %arg4: tensor<f32>):
-    %1 = mhlo.add %arg3, %arg4 : tensor<f32>
-    "mhlo.return"(%1) : (tensor<f32>) -> ()
-  }) {indices_are_sorted = false,
-      scatter_dimension_numbers = #mhlo.scatter<
-      update_window_dims = [1],
-      inserted_window_dims = [0],
-      scatter_dims_to_operand_dims = [0],
-      index_vector_dim = 1>, 
-      unique_indices = false
-      } : (tensor<17x11xf32>, tensor<7xi32>, tensor<7x11xf32>) -> tensor<17x11xf32>
-  return %0 : tensor<17x11xf32>
-}
-
-// CHECK-LABEL: func.func @scatter_implicit_indices
-// CHECK: %[[EXPAND:.+]] = tensor.expand_shape %arg1 {{\[\[}}0, 1]] : tensor<7xi32> into tensor<7x1xi32>
-// CHECK: %[[SCATTER:.+]] = "mhlo.scatter"(%arg0, %[[EXPAND]], %arg2) ({
-// CHECK-NEXT: ^bb0(%[[A0:.+]]: tensor<f32>, %[[A1:.+]]: tensor<f32>):
-// CHECK-NEXT:   %[[ADD:.+]] = mhlo.add %[[A0]], %[[A1]] : tensor<f32>
-// CHECK-NEXT:   mhlo.return %[[ADD]]
-// CHECK-NEXT: })
-// CHECK-SAME: indices_are_sorted = false,
-// CHECK-SAME: scatter_dimension_numbers = #mhlo.scatter<
-// CHECK-SAME:   update_window_dims = [1],
-// CHECK-SAME:   inserted_window_dims = [0],
-// CHECK-SAME:   scatter_dims_to_operand_dims = [0],
-// CHECK-SAME:   index_vector_dim = 1>,
-// CHECK-SAME:   unique_indices = false
-
-// -----
-
-func.func @scatter_collapse_batch(%arg0: tensor<1x24x512xi32>,
-    %arg1: tensor<2x3x2xi32>, %arg2: tensor<2x3x512xi32>) -> tensor<1x24x512xi32> {
-  %0 = "mhlo.scatter"(%arg0, %arg1, %arg2) ( {
-  ^bb0(%arg3: tensor<i32>, %arg4: tensor<i32>):
-    "mhlo.return"(%arg4) : (tensor<i32>) -> ()
-  }) {indices_are_sorted = false,
-      scatter_dimension_numbers = #mhlo.scatter<
-        update_window_dims = [2],
-        inserted_window_dims = [0, 1],
-        scatter_dims_to_operand_dims = [0, 1],
-        index_vector_dim = 2,
-      >,
-      unique_indices = true
-  } : (tensor<1x24x512xi32>, tensor<2x3x2xi32>, tensor<2x3x512xi32>) -> tensor<1x24x512xi32>
-  return %0 : tensor<1x24x512xi32>
-}
-
-// CHECK-LABEL: func.func @scatter_collapse_batch
-// CHECK: %[[COLLAPSE0:.+]] = tensor.collapse_shape %arg1 {{\[\[}}0, 1], [2]] : tensor<2x3x2xi32> into tensor<6x2xi32>
-// CHECK: %[[COLLAPSE1:.+]] = tensor.collapse_shape %arg2 {{\[\[}}0, 1], [2]] : tensor<2x3x512xi32> into tensor<6x512xi32>
-// CHECK: %[[SCATTER:.+]] = "mhlo.scatter"(%arg0, %[[COLLAPSE0]], %[[COLLAPSE1]])
-// CHECK: ^bb0(%[[ARG0:.+]]: tensor<i32>, %[[ARG1:.+]]: tensor<i32>):
-// CHECK:   mhlo.return %[[ARG1]]
-// CHECK: }) {
-// CHECK: indices_are_sorted = false,
-// CHECK-SAME: scatter_dimension_numbers = #mhlo.scatter<update_window_dims = [1]
-// CHECK-SAME: inserted_window_dims = [0, 1]
-// CHECK-SAME: scatter_dims_to_operand_dims = [0, 1]
-// CHECK-SAME: index_vector_dim = 1>
-// CHECK-SAME: unique_indices = true
-// CHECK: return %[[SCATTER]]
-
-//-----
-
 func.func @mul_float_bool_cast(%arg0 : tensor<?xi1>, %arg1 : tensor<?xf32>) -> tensor<?xf32> {
-  %0 = "mhlo.convert"(%arg0) : (tensor<?xi1>) -> tensor<?xf32>
+  %0 = mhlo.convert %arg0 : (tensor<?xi1>) -> tensor<?xf32>
   %1 = "mhlo.multiply"(%0, %arg1) : (tensor<?xf32>, tensor<?xf32>) -> tensor<?xf32>
   return %1 : tensor<?xf32>
 }
 
 // CHECK-LABEL: @mul_float_bool_cast
 // CHECK: %[[ZERO:.+]] = mhlo.constant dense<0.000000e+00> : tensor<f32>
-// CHECK: %[[BTOF:.+]] = mhlo.convert(%arg0) : (tensor<?xi1>) -> tensor<?xf32>
-// CHECK: %[[FTOB:.+]] = mhlo.convert(%[[BTOF]]) : (tensor<?xf32>) -> tensor<?xi1>
+// CHECK: %[[BTOF:.+]] = mhlo.convert %arg0 : (tensor<?xi1>) -> tensor<?xf32>
+// CHECK: %[[FTOB:.+]] = mhlo.convert %[[BTOF]] : (tensor<?xf32>) -> tensor<?xi1>
 // CHECK: %[[SHP:.+]] = shape.shape_of %[[BTOF]] : tensor<?xf32> -> tensor<1xindex>
 // CHECK: %[[BROADCAST:.+]] = "mhlo.dynamic_broadcast_in_dim"(%[[ZERO]], %[[SHP]]) {broadcast_dimensions = dense<> : tensor<0xi64>}
-// CHECK: %[[SELECT:.+]] = "mhlo.select"(%[[FTOB]], %arg1, %[[BROADCAST]])
+// CHECK: %[[SELECT:.+]] = mhlo.select %[[FTOB]], %arg1, %[[BROADCAST]]
 
 // -----
 
 func.func @mul_float_bool_cast_broadcast(%arg0: tensor<5xi1>, %arg1: tensor<5x6xf32>) -> tensor<5x6xf32> {
-  %0 = "mhlo.convert"(%arg0) : (tensor<5xi1>) -> tensor<5xf32>
+  %0 = mhlo.convert %arg0 : (tensor<5xi1>) -> tensor<5xf32>
   %1 = "mhlo.broadcast_in_dim"(%0) {broadcast_dimensions = dense<0> : tensor<1xi64>} : (tensor<5xf32>) -> tensor<5x6xf32>
   %2 = mhlo.multiply %1, %arg1 : tensor<5x6xf32>
   return %2 : tensor<5x6xf32>
@@ -358,7 +274,7 @@ func.func @mul_float_bool_cast_broadcast(%arg0: tensor<5xi1>, %arg1: tensor<5x6x
 // -----
 
 func.func @mul_float_bool_cast_dyn_broadcast(%arg0: tensor<?xi1>, %arg1: tensor<?x?xf32>) -> tensor<?x?xf32> {
-    %0 = "mhlo.convert"(%arg0) : (tensor<?xi1>) -> tensor<?xf32>
+    %0 = mhlo.convert %arg0 : (tensor<?xi1>) -> tensor<?xf32>
     %1 = shape.shape_of %arg1 : tensor<?x?xf32> -> tensor<2xindex>
     %2 = "mhlo.dynamic_broadcast_in_dim"(%0, %1) {broadcast_dimensions = dense<0> : tensor<1xi64>} : (tensor<?xf32>, tensor<2xindex>) -> tensor<?x?xf32>
     %3 = mhlo.multiply %2, %arg1 : tensor<?x?xf32>
@@ -372,8 +288,8 @@ func.func @mul_float_bool_cast_dyn_broadcast(%arg0: tensor<?xi1>, %arg1: tensor<
 
 // CHECK-LABEL: @dot_general_fuse_both_with_attrs
 func.func @dot_general_fuse_both_with_attrs(%arg0: tensor<16x64x128xf16>, %arg1: tensor<16x128x3072xf16>) -> tensor<16x64x3072xf32> {
-  %0 = mhlo.convert(%arg0) : (tensor<16x64x128xf16>) -> tensor<16x64x128xf32>
-  %1 = mhlo.convert(%arg1) : (tensor<16x128x3072xf16>) -> tensor<16x128x3072xf32>
+  %0 = mhlo.convert %arg0 : (tensor<16x64x128xf16>) -> tensor<16x64x128xf32>
+  %1 = mhlo.convert %arg1 : (tensor<16x128x3072xf16>) -> tensor<16x128x3072xf32>
   // CHECK: "mhlo.dot_general"(%arg0, %arg1)
     // CHECK-SAME: dot_dimension_numbers = #mhlo.dot<lhs_batching_dimensions = [0], rhs_batching_dimensions = [0], lhs_contracting_dimensions = [2], rhs_contracting_dimensions = [1]>,
     // CHECK-SAME: precision_config = [#mhlo<precision DEFAULT>, #mhlo<precision DEFAULT>]
@@ -386,9 +302,9 @@ func.func @dot_general_fuse_both_with_attrs(%arg0: tensor<16x64x128xf16>, %arg1:
 
 // CHECK-LABEL: @dot_general_fuse_one
 func.func @dot_general_fuse_one(%arg0: tensor<16x64x128xf64>, %arg1: tensor<16x128x3072xf16>) -> tensor<16x64x3072xf32> {
-  %0 = mhlo.convert(%arg0) : (tensor<16x64x128xf64>) -> tensor<16x64x128xf32>
-  %1 = mhlo.convert(%arg1) : (tensor<16x128x3072xf16>) -> tensor<16x128x3072xf32>
-  // CHECK: %[[CONVERT:.+]] = mhlo.convert(%arg0)
+  %0 = mhlo.convert %arg0 : (tensor<16x64x128xf64>) -> tensor<16x64x128xf32>
+  %1 = mhlo.convert%arg1 : (tensor<16x128x3072xf16>) -> tensor<16x128x3072xf32>
+  // CHECK: %[[CONVERT:.+]] = mhlo.convert %arg0
   // CHECK: "mhlo.dot_general"(%[[CONVERT]], %arg1)
   %2 = "mhlo.dot_general"(%0, %1) {dot_dimension_numbers = #mhlo.dot<lhs_batching_dimensions = [0], rhs_batching_dimensions = [0], lhs_contracting_dimensions = [2], rhs_contracting_dimensions = [1]>, precision_config = [#mhlo<precision DEFAULT>, #mhlo<precision DEFAULT>]} : (tensor<16x64x128xf32>, tensor<16x128x3072xf32>) -> tensor<16x64x3072xf32>
   return %2 : tensor<16x64x3072xf32>
@@ -398,8 +314,8 @@ func.func @dot_general_fuse_one(%arg0: tensor<16x64x128xf64>, %arg1: tensor<16x1
 
 // CHECK-LABEL: @dot_basic
 func.func @dot_basic(%arg0: tensor<4x4xf16>, %arg1: tensor<4x4xf16>) -> tensor<4x4xf32> {
-  %0 = mhlo.convert(%arg0) : (tensor<4x4xf16>) -> tensor<4x4xf32>
-  %1 = mhlo.convert(%arg1) : (tensor<4x4xf16>) -> tensor<4x4xf32>
+  %0 = mhlo.convert %arg0 : (tensor<4x4xf16>) -> tensor<4x4xf32>
+  %1 = mhlo.convert %arg1 : (tensor<4x4xf16>) -> tensor<4x4xf32>
   // CHECK: %[[DOT:.+]] = "mhlo.dot"(%arg0, %arg1)
   %2 = "mhlo.dot"(%0, %1) {precision_config = [#mhlo<precision DEFAULT>, #mhlo<precision DEFAULT>]} : (tensor<4x4xf32>, tensor<4x4xf32>) -> tensor<4x4xf32>
   // CHECK: return %[[DOT]]
@@ -410,7 +326,7 @@ func.func @dot_basic(%arg0: tensor<4x4xf16>, %arg1: tensor<4x4xf16>) -> tensor<4
 
 // CHECK-LABEL: @convolution
 func.func @convolution(%arg0: tensor<16x32x256xbf16>, %arg1: tensor<1x256x256xbf16>) -> tensor<16x32x256xf32> {
-  %cast = mhlo.convert(%arg0) : (tensor<16x32x256xbf16>) -> tensor<16x32x256xf32>
+  %cast = mhlo.convert %arg0 : (tensor<16x32x256xbf16>) -> tensor<16x32x256xf32>
   // CHECK: %[[CONV:.+]] = mhlo.convolution(%arg0, %arg1)
   // CHECK-SAME: -> tensor<16x32x256xf32>
   %0 = "mhlo.convolution"(%cast, %arg1) {

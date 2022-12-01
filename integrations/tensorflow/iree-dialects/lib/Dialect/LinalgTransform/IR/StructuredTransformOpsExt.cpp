@@ -6,6 +6,7 @@
 
 #include "iree-dialects/Dialect/LinalgTransform/StructuredTransformOpsExt.h"
 
+#include "iree-dialects/Dialect/LinalgExt/Passes/Passes.h"
 #include "iree-dialects/Dialect/LinalgTransform/LinalgTransformOps.h"
 #include "iree-dialects/Dialect/LinalgTransform/ScopedTransform.h"
 #include "iree-dialects/Transforms/Listener.h"
@@ -50,24 +51,29 @@
 #include "mlir/Transforms/InliningUtils.h"
 #include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
 #include "mlir/Transforms/Passes.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FormatVariadic.h"
+#include <mlir/Dialect/Transform/IR/TransformDialect.h>
+#include <mlir/IR/MLIRContext.h>
 
 #define DEBUG_TYPE "transform-ops-ext"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE << "]: ")
 
 using namespace mlir;
+using mlir::iree_compiler::IREE::LinalgExt::LinalgEnablingOptions;
 
 //===----------------------------------------------------------------------===//
 // Additional constraints for PDLMatchOp.
 //===----------------------------------------------------------------------===//
 
 /// Hook for PDL driver to check if an operation (`values[0]`) is directly
-/// nested in a function with the name provided by an attribute (`values[1]`).
+/// nested in a function with the name provided by an attribute
+/// (`values[1]`).
 /// TODO: PDL needs user-defined "questions".
 static LogicalResult nestedInFunc(PatternRewriter &rewriter,
                                   Operation *operation, Attribute attr) {
@@ -125,11 +131,24 @@ static LogicalResult isEquivalentToOpImpl(PatternRewriter &rewriter,
                                           linalg::LinalgOp linalgOp,
                                           linalg::LinalgOp linalgModelOp) {
   // If basic properties do not match, return failure.
-  if (linalgOp.getInputs() != linalgModelOp.getInputs() ||
-      linalgOp.getOutputs() != linalgModelOp.getOutputs() ||
-      linalgOp.getIndexingMaps() != linalgModelOp.getIndexingMaps() ||
-      linalgOp.iterator_types() != linalgModelOp.iterator_types())
-    return failure();
+  {
+    OpOperandVector opInputs = linalgOp.getDpsInputOperands();
+    OpOperandVector modelInputs = linalgModelOp.getDpsInputOperands();
+    OpOperandVector opOutputs = linalgOp.getDpsInitOperands();
+    OpOperandVector modelOutputs = linalgModelOp.getDpsInitOperands();
+    auto notEqualFn = [](std::tuple<OpOperand *, OpOperand *> in) -> bool {
+      return std::get<0>(in)->get() != std::get<1>(in)->get();
+    };
+
+    if (opInputs.size() != modelInputs.size() ||
+        opOutputs.size() != modelOutputs.size() ||
+        llvm::any_of(llvm::zip(opInputs, modelInputs), notEqualFn) ||
+        llvm::any_of(llvm::zip(opOutputs, modelOutputs), notEqualFn) ||
+        linalgOp.getIndexingMaps() != linalgModelOp.getIndexingMaps() ||
+        linalgOp.getIteratorTypesArray() !=
+            linalgModelOp.getIteratorTypesArray())
+      return failure();
+  }
 
   // Build the block and go perform a body comparison.
   {
@@ -327,15 +346,24 @@ transform_ext::StructuredTransformOpsExtension::
 static linalg::LinalgOp findSingleLinalgOpDefiningAll(ValueRange range) {
   linalg::LinalgOp sourceOp = nullptr;
   for (Value value : range) {
-    // See through tensor casts.
+    // See through tensor casts and reshape ops.
     //
     // TODO: we may need some generalization (interfaces?) of this for other
     // operations, especially multi-operand ones to understand which of their
     // operands may be coming from a Linalg op. Or a completely different
     // mechanism of tracking op replacement at creation, or even different
     // patterns that identify the "main" result of a transformation.
-    while (auto castOp = value.getDefiningOp<tensor::CastOp>())
-      value = castOp.getSource();
+    while (isa<tensor::CastOp, tensor::CollapseShapeOp, tensor::ExpandShapeOp>(
+        value.getDefiningOp())) {
+      value = llvm::TypeSwitch<Operation *, Value>(value.getDefiningOp())
+                  .Case([](tensor::CastOp op) { return op.getSource(); })
+                  .Case([](tensor::CollapseShapeOp op) { return op.getSrc(); })
+                  .Case([](tensor::ExpandShapeOp op) { return op.getSrc(); })
+                  .Default([](Operation *) {
+                    llvm_unreachable("Wrong op type");
+                    return Value();
+                  });
+    }
 
     if (auto currentSourceOp = value.getDefiningOp<linalg::LinalgOp>()) {
       if (!sourceOp || sourceOp == currentSourceOp) {
@@ -414,15 +442,15 @@ static Operation *findSingleDefiningOp(Operation *replacedOp,
       });
 }
 
-void mlir::TrackingListener::notifyOperationReplaced(Operation *op,
-                                                     ValueRange newValues) {
+void mlir::TrackingListener::notifyRootReplaced(Operation *op,
+                                                ValueRange newValues) {
   // Bail out if in error state.
   if (hadErrors)
     return;
 
   // Exit early if the op is not tracked.
-  Value handle = getTransformState().getHandleForPayloadOp(op);
-  if (!handle)
+  SmallVector<Value> handles;
+  if (failed(getTransformState().getHandlesForPayloadOp(op, handles)))
     return;
 
   Operation *replacement = findSingleDefiningOp(op, newValues);
@@ -431,8 +459,8 @@ void mlir::TrackingListener::notifyOperationReplaced(Operation *op,
     return;
   }
 
-  LLVM_DEBUG(DBGS() << "replacing tracked " << *op << " with " << *replacement
-                    << " for " << handle << "\n");
+  LLVM_DEBUG(DBGS() << "replacing tracked @" << op << " : " << *op << " with "
+                    << *replacement << "\n");
   mayFail(replacePayloadOp(op, replacement));
 }
 
@@ -442,11 +470,21 @@ void mlir::TrackingListener::notifyOperationRemoved(Operation *op) {
     return;
 
   // Exit early if the op is not tracked.
-  Value handle = getTransformState().getHandleForPayloadOp(op);
-  if (!handle)
+  SmallVector<Value> handles;
+  if (failed(getTransformState().getHandlesForPayloadOp(op, handles)))
     return;
 
-  LLVM_DEBUG(DBGS() << "removing tracked " << *op << " for " << handle << "\n");
+  LLVM_DEBUG(DBGS() << "removing tracked @" << op << " : " << *op << "\n");
+  mayFail(replacePayloadOp(op, nullptr));
+}
+
+void mlir::TrackingListener::removeMappings(Operation *op) {
+  // Bail if in error state.
+  if (hadErrors)
+    return;
+
+  // Replacing the tracked op with null will stop the tracking.
+  LLVM_DEBUG(DBGS() << "removing mappings @" << op << " : " << *op << "\n");
   mayFail(replacePayloadOp(op, nullptr));
 }
 
@@ -454,11 +492,30 @@ void mlir::TrackingListener::notifyOperationRemoved(Operation *op) {
 // CanonicalizedSequenceOp
 //===----------------------------------------------------------------------===//
 
+void ::transform_ext::CanonicalizedSequenceOp::build(
+    OpBuilder &builder, OperationState &state,
+    transform::FailurePropagationMode failurePropagationMode,
+    ::transform_ext::CanonicalizedSequenceOp::BodyBuilderFn bodyBuilder) {
+  assert(state.name.isRegistered() && "not registered!!");
+  assert(bodyBuilder && "requires a body builder");
+  MLIRContext *ctx = builder.getContext();
+  state.addAttribute(
+      CanonicalizedSequenceOp::getFailurePropagationModeAttrName(state.name),
+      transform::FailurePropagationModeAttr::get(ctx, failurePropagationMode));
+  Region *bodyRegion = state.addRegion();
+  bodyRegion->push_back(new Block);
+  Block &bodyBlock = bodyRegion->front();
+  bodyBlock.addArgument(pdl::OperationType::get(ctx), state.location);
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToStart(&bodyBlock);
+  bodyBuilder(builder, state.location, bodyBlock.getArgument(0));
+}
+
 /// Run enabling transformations (LICM and its variants, single-iteration loop
 /// removal, CSE) on the given function.
 static LogicalResult performEnablerTransformations(
     func::FuncOp func, RewriteListener &listener,
-    linalg::LinalgEnablingOptions options = linalg::LinalgEnablingOptions()) {
+    LinalgEnablingOptions options = LinalgEnablingOptions()) {
   MLIRContext *ctx = func->getContext();
   RewritePatternSet patterns(ctx);
   linalg::populateLinalgTilingCanonicalizationPatterns(patterns);
@@ -492,13 +549,85 @@ static LogicalResult performEnablerTransformations(
 /// operation tracking information.
 static LogicalResult performEnablerTransformations(
     Operation *containerOp, RewriteListener &listener,
-    linalg::LinalgEnablingOptions options = linalg::LinalgEnablingOptions()) {
+    LinalgEnablingOptions options = LinalgEnablingOptions()) {
   auto res = containerOp->walk([&](func::FuncOp func) {
     if (failed(performEnablerTransformations(func, listener, options)))
       return WalkResult::interrupt();
     return WalkResult::advance();
   });
   return failure(res.wasInterrupted());
+}
+
+/// Drop the association between payload operations and transform dialect
+/// handles when it is no longer necessary in a canonicalized sequence.
+/// Specifically, drop the association between payload operations and the
+/// operand handles if all handles to them will not be used after the current
+/// `transform`. Also drop the association between payload operations and result
+/// handles if results are never read. Note that the operand part is specific to
+/// sequence-like execution that is not guaranteed in the transform dialect in
+/// general.
+static void
+forgetUnnecessaryHandles(transform::TransformState &state,
+                         transform_ext::CanonicalizedSequenceOp sequence,
+                         transform::TransformOpInterface transform) {
+  auto *listener = state.getExtension<TrackingListener>();
+  assert(transform->getParentOp() == sequence &&
+         "only works for transform ops immediately nested in a canonicalized "
+         "sequence");
+  assert(listener && "expected tracking listener to be present");
+
+  // Checks if the operation or its ancestor is before `transform` in its block
+  // or is `transform` itself.
+  auto userIsBefore = [&](Operation *user) {
+    while (user && user->getParentOp() != sequence)
+      user = user->getParentOp();
+    if (!user)
+      return false;
+    return user->isBeforeInBlock(transform) || user == transform;
+  };
+
+  // Drop associations for operands that will not be read again. Ignore consumed
+  // operands that have been deassociated already. Consider all handles to each
+  // payload operation and only drop the association if all handles pointing to
+  // the same operation will are not used after the current transform op. The
+  // handle will be erased automatically after the last payload operation is
+  // deassociated from it.
+  llvm::SmallDenseSet<Operation *> seen;
+  llvm::SmallDenseMap<Value, bool> handlesUsedAfterTransform;
+  for (Value operand : transform->getOperands()) {
+    if (transform::isHandleConsumed(operand, transform))
+      continue;
+
+    for (Operation *payload : state.getPayloadOps(operand)) {
+      if (!payload || seen.contains(payload))
+        continue;
+      SmallVector<Value> allHandles;
+      (void)state.getHandlesForPayloadOp(payload, allHandles);
+      bool allHandlesUnused = llvm::all_of(allHandles, [&](Value handle) {
+        if (!handlesUsedAfterTransform.count(handle)) {
+          handlesUsedAfterTransform[handle] =
+              !llvm::all_of(handle.getUsers(), userIsBefore);
+        }
+        return !handlesUsedAfterTransform[handle];
+      });
+      if (allHandlesUnused) {
+        listener->removeMappings(payload);
+        seen.insert(payload);
+      }
+    }
+  }
+
+  // Drop associations for results that will never be read.
+  for (Value result : transform->getResults()) {
+    if (!result.getUses().empty())
+      continue;
+    for (Operation *payload : state.getPayloadOps(result)) {
+      if (!payload || seen.contains(payload))
+        continue;
+      listener->removeMappings(payload);
+      seen.insert(payload);
+    }
+  }
 }
 
 DiagnosedSilenceableFailure transform_ext::CanonicalizedSequenceOp::apply(
@@ -532,10 +661,14 @@ DiagnosedSilenceableFailure transform_ext::CanonicalizedSequenceOp::apply(
         for (Operation *target : roots) {
           // Make sure we always check the error state, no boolean
           // short-circuting.
-          LogicalResult result = transform(target, listener);
-          LogicalResult listenerResult = listener.checkErrorState();
-          if (failed(result) || failed(listenerResult))
+          if (failed(transform(target, listener))) {
+            target->emitOpError("Transform application failed.");
             return failure();
+          }
+          if (failed(listener.checkErrorState())) {
+            target->emitOpError("Listener failed.");
+            return failure();
+          }
         }
         return success();
       };
@@ -566,15 +699,19 @@ DiagnosedSilenceableFailure transform_ext::CanonicalizedSequenceOp::apply(
   };
 
   LLVM_DEBUG(DBGS() << "begin canonicalizing sequence\n");
-  if (failed(checkedListenerTransform(performCSE)))
-    return DiagnosedSilenceableFailure::definiteFailure();
-  if (failed(checkedListenerTransform(performCanonicalization)))
-    return DiagnosedSilenceableFailure::definiteFailure();
+  if (failed(checkedListenerTransform(performCSE))) {
+    return mlir::emitDefiniteFailure(
+        *this, "Failed to performCSE beform transform sequence");
+  }
+  if (failed(checkedListenerTransform(performCanonicalization))) {
+    return mlir::emitDefiniteFailure(
+        *this, "Failed to performCanonicalization beform transform sequence");
+  }
 
   // Apply the sequenced ops one by one.
   for (Operation &transform : getBodyBlock()->without_terminator()) {
-    DiagnosedSilenceableFailure result =
-        state.applyTransform(cast<transform::TransformOpInterface>(transform));
+    auto transformOp = cast<transform::TransformOpInterface>(transform);
+    DiagnosedSilenceableFailure result = state.applyTransform(transformOp);
     if (result.isDefiniteFailure()) {
       LLVM_DEBUG(DBGS() << "failed: " << transform << "\n");
       return result;
@@ -588,12 +725,25 @@ DiagnosedSilenceableFailure transform_ext::CanonicalizedSequenceOp::apply(
     }
     LLVM_DEBUG(DBGS() << "successfully performed: " << transform << "\n");
 
-    if (failed(checkedListenerTransform(performCSE)))
-      return DiagnosedSilenceableFailure::definiteFailure();
-    if (failed(checkedListenerTransform(performEnabler)))
-      return DiagnosedSilenceableFailure::definiteFailure();
-    if (failed(checkedListenerTransform(performCanonicalization)))
-      return DiagnosedSilenceableFailure::definiteFailure();
+    // Canonicalization may replace payload operations associated with the
+    // transform dialect handles. Post-canonicalize reassociation is fragile and
+    // may fail. To make this less likely, drop any association that are no
+    // longer necessary, i.e., if the operand is no longer used in the sequence
+    // or elsewhere or if the result is never read.
+    forgetUnnecessaryHandles(state, *this, transformOp);
+
+    if (failed(checkedListenerTransform(performCSE))) {
+      return mlir::emitDefiniteFailure(&transform,
+                                       "Failed to performCSE after transform");
+    }
+    if (failed(checkedListenerTransform(performEnabler))) {
+      return mlir::emitDefiniteFailure(
+          &transform, "Failed to performEnabler after transform");
+    }
+    if (failed(checkedListenerTransform(performCanonicalization))) {
+      return mlir::emitDefiniteFailure(
+          &transform, "Failed to performCanonicalization after transform");
+    }
   }
 
   // Forward the operation mapping for values yielded from the sequence to the
@@ -697,31 +847,17 @@ LogicalResult transform_ext::CanonicalizedSequenceOp::verify() {
 void transform_ext::CanonicalizedSequenceOp::getEffects(
     SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
   auto *mappingResource = transform::TransformMappingResource::get();
-  effects.emplace_back(MemoryEffects::Read::get(), getRoot(), mappingResource);
-
+  // Effects on root if present.
+  if (getRoot())
+    effects.emplace_back(MemoryEffects::Read::get(), getRoot(),
+                         mappingResource);
+  // Effects on results.
   for (Value result : getResults()) {
     effects.emplace_back(MemoryEffects::Allocate::get(), result,
                          mappingResource);
     effects.emplace_back(MemoryEffects::Write::get(), result, mappingResource);
   }
 
-  if (!getRoot()) {
-    for (Operation &op : *getBodyBlock()) {
-      auto iface = dyn_cast<MemoryEffectOpInterface>(&op);
-      if (!iface) {
-        // TODO: fill all possible effects; or require ops to actually implement
-        // the memory effect interface always
-        assert(false);
-      }
-
-      SmallVector<MemoryEffects::EffectInstance, 2> nestedEffects;
-      iface.getEffects(effects);
-    }
-    return;
-  }
-
-  // Carry over all effects on the argument of the entry block as those on the
-  // operand, this is the same value just remapped.
   for (Operation &op : *getBodyBlock()) {
     auto iface = dyn_cast<MemoryEffectOpInterface>(&op);
     if (!iface) {
@@ -729,17 +865,24 @@ void transform_ext::CanonicalizedSequenceOp::getEffects(
       // the memory effect interface always
       assert(false);
     }
-
-    SmallVector<MemoryEffects::EffectInstance, 2> nestedEffects;
-    iface.getEffectsOnValue(getBodyBlock()->getArgument(0), nestedEffects);
-    for (const auto &effect : nestedEffects)
-      effects.emplace_back(effect.getEffect(), getRoot(), effect.getResource());
+    if (getRoot()) {
+      // Carry over all effects on the argument of the entry block as those on
+      // the operand, this is the same value just remapped.
+      SmallVector<MemoryEffects::EffectInstance, 2> nestedEffects;
+      iface.getEffectsOnValue(getBodyBlock()->getArgument(0), nestedEffects);
+      for (const auto &effect : nestedEffects)
+        effects.emplace_back(effect.getEffect(), getRoot(),
+                             effect.getResource());
+    } else {
+      // Otherwise, get all the effects.
+      iface.getEffects(effects);
+    }
   }
 }
 
 OperandRange transform_ext::CanonicalizedSequenceOp::getSuccessorEntryOperands(
     Optional<unsigned> index) {
-  assert(index && index.getValue() == 0 && "unexpected region index");
+  assert(index && index.value() == 0 && "unexpected region index");
   if (getOperation()->getNumOperands() == 1)
     return getOperation()->getOperands();
   return OperandRange(getOperation()->operand_end(),
@@ -749,7 +892,7 @@ OperandRange transform_ext::CanonicalizedSequenceOp::getSuccessorEntryOperands(
 void transform_ext::CanonicalizedSequenceOp::getSuccessorRegions(
     Optional<unsigned> index, ArrayRef<Attribute> operands,
     SmallVectorImpl<RegionSuccessor> &regions) {
-  if (!index.hasValue()) {
+  if (!index.has_value()) {
     Region *bodyRegion = &getBody();
     regions.emplace_back(bodyRegion, !operands.empty()
                                          ? bodyRegion->getArguments()
@@ -973,36 +1116,4 @@ transform_ext::LowerVectorsOp::apply(mlir::transform::TransformResults &results,
 
   // TODO: make composable...
   return DiagnosedSilenceableFailure::success();
-}
-
-//===---------------------------------------------------------------------===//
-// PrintOp
-//===---------------------------------------------------------------------===//
-
-DiagnosedSilenceableFailure
-transform_ext::PrintOp::apply(mlir::transform::TransformResults &results,
-                              mlir::transform::TransformState &state) {
-  if (!getTarget()) {
-    llvm::outs() << "[[[ IR printer: " << getName() << " top-level ]]]\n";
-    state.getTopLevel()->dump();
-    return DiagnosedSilenceableFailure::success();
-  }
-
-  llvm::outs() << "[[[ IR printer: " << getName() << " ]]]\n";
-  ArrayRef<Operation *> targets = state.getPayloadOps(getTarget());
-  for (Operation *target : targets)
-    llvm::outs() << *target << "\n";
-  return DiagnosedSilenceableFailure::success();
-}
-
-void transform_ext::PrintOp::getEffects(
-    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
-  effects.emplace_back(MemoryEffects::Read::get(), getTarget(),
-                       mlir::transform::TransformMappingResource::get());
-  effects.emplace_back(MemoryEffects::Read::get(),
-                       mlir::transform::PayloadIRResource::get());
-
-  // There is no resource for stdout file descriptor, so just declare print
-  // writes into the default resource.
-  effects.emplace_back(MemoryEffects::Write::get());
 }

@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtDialect.h"
+#include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "iree-dialects/Dialect/LinalgTransform/LinalgTransformOps.h"
 #include "iree-dialects/Dialect/LinalgTransform/Passes.h"
 #include "iree-dialects/Dialect/LinalgTransform/TransformInterpreterUtils.h"
@@ -44,14 +45,15 @@ LogicalResult mlir::transform::parseTransformModuleFromFile(
     OwningOpRef<ModuleOp> &transformModule) {
   if (transformFileName.empty()) {
     llvm::errs() << "no transform file name specified, assuming the transform "
-                    "module is embedded in the IR next to the top-level";
+                    "module is embedded in the IR next to the top-level\n";
     return success();
   }
   // Parse transformFileName content into a ModuleOp.
   std::string errorMessage;
   auto memoryBuffer = mlir::openInputFile(transformFileName, &errorMessage);
   if (!memoryBuffer) {
-    llvm::errs() << "failed to parse transform file: " << transformFileName;
+    llvm::errs() << "failed to parse transform file: " << transformFileName
+                 << "\n";
     return failure();
   }
   // Tell sourceMgr about this buffer, the parser will pick it up.
@@ -81,10 +83,9 @@ LogicalResult mlir::transform::applyTransformsInRegion(Region &transformRegion,
 #ifndef NDEBUG
     options = options.enableExpensiveChecks();
 #endif
-    transform::TransformState state(r, target, options);
     auto xform = cast<transform::TransformOpInterface>(b.clone(*transform));
     auto g = llvm::make_scope_exit([&]() { xform->erase(); });
-    if (failed(state.applyTransform(xform).checkAndReport()))
+    if (failed(transform::applyTransforms(target, xform, options)))
       return failure();
   }
   return success();
@@ -240,6 +241,8 @@ struct DropSchedulePass : public PassWrapper<DropSchedulePass, Pass> {
 
   void runOnOperation() override {
     getOperation()->walk<WalkOrder::PreOrder>([&](Operation *nestedOp) {
+      if (isa<iree_compiler::IREE::LinalgExt::DoNotDCEOperandsOp>(nestedOp))
+        nestedOp->erase();
       if (isa<::mlir::transform::TransformOpInterface>(nestedOp)) {
         nestedOp->erase();
         return WalkResult::skip();

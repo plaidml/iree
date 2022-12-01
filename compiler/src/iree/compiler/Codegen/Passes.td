@@ -75,6 +75,12 @@ def BufferizeCopyOnlyDispatches :
   let constructor = "mlir::iree_compiler::createBufferizeCopyOnlyDispatchesPass()";
 }
 
+def EliminateEmptyTensors :
+    Pass<"iree-eliminate-empty-tensors", "ModuleOp"> {
+  let summary = "Eliminate tensor.empty ops to avoid buffer allocations";
+  let constructor = "mlir::iree_compiler::createEliminateEmptyTensorsPass()";
+}
+
 def IREEComprehensiveBufferize :
     Pass<"iree-codegen-iree-comprehensive-bufferize", "ModuleOp"> {
   let summary = "Convert from to Linalg ops on tensors to buffers";
@@ -89,16 +95,40 @@ def IREEComprehensiveBufferize :
   ];
 }
 
+def IREEMaterializeEncoding :
+    Pass<"iree-codegen-materialize-encoding", "func::FuncOp"> {
+  let summary = "Materialize the encoding for tensor as specified by the backend";
+  let constructor = "mlir::iree_compiler::createIREEMaterializeEncodingPass()";
+}
+
 def OptimizeVectorTransfer :
     Pass<"iree-codegen-optimize-vector-transfer", "func::FuncOp"> {
   let summary =
       "Run optimization transformations on vector transfer operations";
   let constructor = "mlir::iree_compiler::createOptimizeVectorTransferPass()";
   let options = [
-    Option<"optionFlatten", "flatten", "bool", "false", "Flatten the vector type of vector transfers where possible (contiguous row-major data).">
+    Option<"optionFlatten", "flatten", "bool", "false",
+           "Flatten the vector type of vector transfers where possible (contiguous row-major data).">
   ];
 }
 
+def SplitFullPartialTransfer :
+    Pass<"iree-codegen-split-full-partial-transfer", "func::FuncOp"> {
+  let summary =
+      "Split a vector.transfer operation into an in-bounds (i.e., no "
+      "out-of-bounds masking) fastpath and a slowpath.";
+  let constructor = "mlir::iree_compiler::createSplitFullPartialTransferPass()";
+  let options = [
+    Option<"splitVectorTransfersTo", "split-transfers", "std::string",
+      /*default=*/"",
+      [{Split vector transfers between slow (masked) and fast "
+        "(unmasked) variants. Possible options are:\n"
+          "\tnone [default]: keep unsplit vector.transfer and pay the price\n"
+          "\tlinalg-copy: use linalg.fill + linalg.generic for the slow path\n"
+          "\tvector-transfers: use extra small unmasked vector.transfers for"
+          " the slow path\n}]>,
+  ];
+}
 
 def TestPartitionableLoopsInterface :
     Pass<"iree-codegen-test-partitionable-loops-interface", ""> {
@@ -158,6 +188,18 @@ def GPUDistributeSharedMemoryCopy :
   let constructor = "mlir::iree_compiler::createGPUDistributeSharedMemoryCopy()";
 }
 
+def GPUReduceBankConflicts :
+    Pass<"iree-gpu-reduce-bank-conflicts", "func::FuncOp"> {
+  let summary = "Pass to try to reduce the number of bank conflicts.";
+  let constructor = "mlir::iree_compiler::createGPUReduceSharedMemoryBankConflicts()";
+}
+
+def GPUMultiBuffering :
+    Pass<"iree-gpu-multi-buffering", "func::FuncOp"> {
+  let summary = "Pass to do multi buffering.";
+  let constructor = "mlir::iree_compiler::createGPUMultiBuffering()";
+}
+
 def GPUPipelining : Pass<"iree-gpu-pipelining", "func::FuncOp"> {
   let summary = "Pass to do software pipelining.";
   let constructor = "mlir::iree_compiler::createGPUPipeliningPass()";
@@ -198,6 +240,12 @@ def TransformDialectInterpreter :
             "dialect spec embedded next to the top-level op.">,
   ];
 }
+def TransformDialectJitter :
+    Pass<"iree-transform-dialect-jitter"> {
+  let summary = "Pass to create and apply transform dialect on the fly.";
+  let constructor =
+    "mlir::iree_compiler::createTransformDialectJitterPass()";
+}
 
 def GPUVectorization :
     Pass<"iree-codegen-gpu-vectorization", "func::FuncOp"> {
@@ -208,6 +256,12 @@ def GPUVectorization :
             /*default=*/"true",
            "Try to convert reduction to vector.contract.">,
   ];
+}
+
+def GPUTileReduction :
+    Pass<"iree-codegen-gpu-tile-reduction", "func::FuncOp"> {
+  let summary = "Pass to tile linalg reduction dimensions.";
+  let constructor = "mlir::iree_compiler::createGPUTileReductionPass()";
 }
 
 def VectorReduceToGPU :
@@ -245,6 +299,11 @@ def ConvertToLLVM :
   let summary =
       "Perform final conversion from Linalg/HAL/Shape/Vector/Standard to LLVMIR dialect";
   let constructor = "mlir::iree_compiler::createConvertToLLVMPass()";
+  let options = [
+    Option<"reassociateFpReductions", "reassociateFpReductions", "bool",
+            /*default=*/"false",
+           "Specifies if FP add and mult reductions can be reordered">,
+  ];
 }
 
 def LLVMCPUEmitVectorizationRemarks :
@@ -317,6 +376,12 @@ def LLVMCPUAssignConstantOrdinals :
   let constructor = "mlir::iree_compiler::createLLVMCPUAssignConstantOrdinalsPass()";
 }
 
+def LLVMCPUAssignImportOrdinals :
+    Pass<"iree-llvmcpu-assign-import-ordinals", "IREE::HAL::ExecutableVariantOp"> {
+  let summary = "Assigns executable import ordinals across all LLVMCPU variants.";
+  let constructor = "mlir::iree_compiler::createLLVMCPUAssignImportOrdinalsPass()";
+}
+
 //------------------------------------------------------------------------------
 // LLVMGPU
 //------------------------------------------------------------------------------
@@ -339,7 +404,7 @@ def ConvertToNVVM :
 
 // TODO: Bring the argument in line with the names used elsewhere.
 def LLVMGPULowerExecutableTarget :
-    Pass<"iree-llvmgpu-lower-executable-target-pass", "mlir::iree_compiler::IREE::HAL::ExecutableVariantOp"> {
+    Pass<"iree-llvmgpu-lower-executable-target", "mlir::iree_compiler::IREE::HAL::ExecutableVariantOp"> {
   let summary = "Perform lowering of executable target using one of the IREE::HAL::DispatchLoweringPassPipeline";
   let constructor = "mlir::iree_compiler::createLLVMGPULowerExecutableTargetPass()";
 }
@@ -380,18 +445,6 @@ def LLVMGPUVectorLowering :
   let constructor = "mlir::iree_compiler::createLLVMGPUVectorLoweringPass()";
 }
 
-def LLVMGPUMultiBuffering :
-    Pass<"iree-llvmgpu-multi-buffering", "func::FuncOp"> {
-  let summary = "Pass to do multi buffering.";
-  let constructor = "mlir::iree_compiler::createLLVMGPUMultiBuffering()";
-}
-
-def LLVMGPUReduceBankConflicts :
-    Pass<"iree-llvmgpu-reduce-bank-conflicts", "func::FuncOp"> {
-  let summary = "Pass try reduce the number of bank conflicts.";
-  let constructor = "mlir::iree_compiler::createLLVMGPUReduceSharedMemoryBankConflicts()";
-}
-
 def LLVMGPUVectorToGPU :
     Pass<"iree-llvmgpu-vector-to-gpu", "func::FuncOp"> {
   let summary = "Pass to convert vector to gpu.";
@@ -411,6 +464,12 @@ def LLVMGPUTensorPad :
 def ConvertToSPIRV : Pass<"iree-convert-to-spirv", "ModuleOp"> {
   let summary = "Perform the final conversion to SPIR-V dialect";
   let constructor = "mlir::iree_compiler::createConvertToSPIRVPass()";
+}
+
+def SPIRVVectorToGPUSubgroupMMA :
+    Pass<"iree-spirv-vector-to-gpu-subgroup-mma-ops", "func::FuncOp"> {
+  let summary = "Pass to convert vector ops to GPU subgroup MMA ops.";
+  let constructor = "mlir::iree_compiler::createSPIRVVectorToGPUSubgroupMMAOpsPass()";
 }
 
 def SPIRVLowerExecutableTarget :
@@ -452,18 +511,17 @@ def SPIRVTileAndPromote : Pass<"iree-spirv-tile-and-promote", "func::FuncOp"> {
                 "workgroup memory and then tile to invocations";
   let constructor =
     "mlir::iree_compiler::createSPIRVTileAndPromotePass()";
+  let options = [
+    Option<"promoteC", "promote-c", "bool", /*default=*/"false",
+          "Promote C matrix to use shared memory">,
+    Option<"skipThread", "skip-thread", "bool", /*default=*/"false",
+          "Skip tiling and distributing to GPU threads">,
+  ];
 }
 
 def SPIRVVectorize : Pass<"iree-spirv-vectorize", "func::FuncOp"> {
   let summary = "Vectorize Linalg ops with buffer semantics";
   let constructor = "mlir::iree_compiler::createSPIRVVectorizePass()";
-}
-
-def SPIRVVectorToCooperativeOps :
-    Pass<"iree-spirv-vector-to-cooperative-ops", "func::FuncOp"> {
-  let summary = "Convert vector ops to SPIR-V cooperative ops";
-  let constructor =
-      "mlir::iree_compiler::createSPIRVVectorToCooperativeOpsPass()";
 }
 
 def SPIRVVectorizeLoadStore :
@@ -472,10 +530,22 @@ def SPIRVVectorizeLoadStore :
   let constructor = "mlir::iree_compiler::createSPIRVVectorizeLoadStore()";
 }
 
+def SPIRVBreakDownLargeVector : Pass<"iree-spirv-breakdown-large-vector",
+                                     "func::FuncOp"> {
+  let summary = "Break down vectors not natively supported by SPIR-V";
+  let constructor = "mlir::iree_compiler::createSPIRVBreakDownLargeVectorPass()";
+}
+
 def SPIRVCreateFastSlowPath :
     Pass<"iree-spirv-create-fast-slow-path", "func::FuncOp"> {
   let summary = "Create separate fast and slow paths to handle padding";
   let constructor = "mlir::iree_compiler::createSPIRVCreateFastSlowPathPass()";
+}
+
+def SPIRVEmulateI64 :
+    Pass<"iree-spirv-emulate-i64", "ModuleOp"> {
+  let summary = "Emulate 64-bit integer opts with 32-bit integer ops";
+  let constructor = "mlir::iree_compiler::createSPIRVEmulateI64Pass()";
 }
 
 //------------------------------------------------------------------------------

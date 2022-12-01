@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtOps.h"
+#include "iree/builtins/ukernel/exported_flag_bits.h"
 #include "iree/compiler/Codegen/PassDetail.h"
 #include "iree/compiler/Codegen/Passes.h"
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
@@ -20,9 +22,6 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-
-// TODO: move these flags to a header file shared with runtime/.
-#define IREE_VMVX_MATMUL_FLAG_ACCUMULATE 1
 
 namespace mlir {
 namespace iree_compiler {
@@ -102,7 +101,7 @@ bool verifyMemRefInnerDimsContiguousRowMajor(MemRefType type) {
   }
   int64_t product_of_inner_sizes = 1;
   for (int i = rank - 1; i >= 2; --i) {
-    if (sizes[i] == ShapedType::kDynamicSize) {
+    if (sizes[i] == ShapedType::kDynamic) {
       return false;
     }
     product_of_inner_sizes *= sizes[i];
@@ -546,7 +545,7 @@ struct LinalgBinaryGenericConversion
     // so we use getOpOperand() vs restricting to just the generic ins.
     OpOperand *operand0 = &op->getOpOperand(operandScalar0.getArgNumber());
     OpOperand *operand1 = &op->getOpOperand(operandScalar1.getArgNumber());
-    OpOperand *result = op.getOutputOperand(0);
+    OpOperand *result = op.getDpsInitOperand(0);
 
     // Returns an emitter for a generic binary compatible operation where
     // |binaryOp| has a 1:1 correspondance with |opcode|.
@@ -585,88 +584,90 @@ struct LinalgBinaryGenericConversion
 
     // Select the op to lower to and configure the emitter.
     // Emit from the iree_ukernel_x32b_opcode_t table.
+    Type resultType = binaryOp->getResult(0).getType();
+    if (!resultType.isIntOrFloat()) return failure();
     Optional<BinaryEmitter> emitter =
         TypeSwitch<Operation *, Optional<BinaryEmitter>>(binaryOp)
             .Case([&](arith::AddFOp op) -> Optional<BinaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericBinary(op, "add");
               }
               return None;
             })
             .Case([&](arith::AddIOp op) -> Optional<BinaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericBinary(op, "add");
               }
               return None;
             })
             .Case([&](arith::AndIOp op) -> Optional<BinaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericBinary(op, "and");
               }
               return None;
             })
             .Case([&](arith::DivFOp op) -> Optional<BinaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericBinary(op, "div");
               }
               return None;
             })
             .Case([&](arith::DivSIOp op) -> Optional<BinaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericBinary(op, "divs");
               }
               return None;
             })
             .Case([&](arith::DivUIOp op) -> Optional<BinaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericBinary(op, "divu");
               }
               return None;
             })
             .Case([&](arith::MulFOp op) -> Optional<BinaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericBinary(op, "mul");
               }
               return None;
             })
             .Case([&](arith::MulIOp op) -> Optional<BinaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericBinary(op, "mul");
               }
               return None;
             })
             .Case([&](arith::OrIOp op) -> Optional<BinaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericBinary(op, "or");
               }
               return None;
             })
             .Case([&](arith::ShLIOp op) -> Optional<BinaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericBinary(op, "shl");
               }
               return None;
             })
             .Case([&](arith::ShRSIOp op) -> Optional<BinaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericBinary(op, "shrs");
               }
               return None;
             })
             .Case([&](arith::XOrIOp op) -> Optional<BinaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericBinary(op, "xor");
               }
               return None;
             })
             .Case([&](arith::SubFOp op) -> Optional<BinaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericBinary(op, "sub");
               }
               return None;
             })
             .Case([&](arith::SubIOp op) -> Optional<BinaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericBinary(op, "sub");
               }
               return None;
@@ -715,7 +716,7 @@ struct LinalgUnaryGenericConversion
     // Note that the operands may map to an out if the aliasing is safe,
     // so we use getOpOperand() vs restricting to just the generic ins.
     OpOperand *operand0 = &op->getOpOperand(operandScalar0.getArgNumber());
-    OpOperand *result = op.getOutputOperand(0);
+    OpOperand *result = op.getDpsInitOperand(0);
 
     // Returns an emitter for a generic binary compatible operation where
     // |binaryOp| has a 1:1 correspondance with |opcode|.
@@ -735,52 +736,54 @@ struct LinalgUnaryGenericConversion
 
     // Select the op to lower to and configure the emitter.
     // Emit from the iree_ukernel_x32b_opcode_t table.
+    Type resultType = unaryOp->getResult(0).getType();
+    if (!resultType.isIntOrFloat()) return failure();
     Optional<UnaryEmitter> emitter =
         TypeSwitch<Operation *, Optional<UnaryEmitter>>(unaryOp)
             .Case([&](math::AbsFOp op) -> Optional<UnaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericUnary(op, "abs");
               }
               return None;
             })
             .Case([&](math::CeilOp op) -> Optional<UnaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericUnary(op, "ceil");
               }
               return None;
             })
             .Case([&](math::CountLeadingZerosOp op) -> Optional<UnaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericUnary(op, "ctlz");
               }
               return None;
             })
             .Case([&](math::ExpOp op) -> Optional<UnaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericUnary(op, "exp");
               }
               return None;
             })
             .Case([&](math::FloorOp op) -> Optional<UnaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericUnary(op, "floor");
               }
               return None;
             })
             .Case([&](math::LogOp op) -> Optional<UnaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericUnary(op, "log");
               }
               return None;
             })
             .Case([&](arith::NegFOp op) -> Optional<UnaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericUnary(op, "neg");
               }
               return None;
             })
             .Case([&](math::RsqrtOp op) -> Optional<UnaryEmitter> {
-              if (op.getResult().getType().getIntOrFloatBitWidth() == 32) {
+              if (resultType.getIntOrFloatBitWidth() == 32) {
                 return configureGenericUnary(op, "rsqrt");
               }
               return None;
@@ -814,15 +817,14 @@ struct LinalgTrivialGenericConversion
 
     // Presumed to be a yield terminator: configure the emitter.
     CopyEmitter emitter;
-    auto allOperands = op.getInputAndOutputOperands();
     Operation &yieldOp = children.front();
     for (auto it : llvm::enumerate(yieldOp.getOperands())) {
       unsigned outputIndex = it.index();
       Value yieldOperand = it.value();
       if (auto blockArg = yieldOperand.dyn_cast<BlockArgument>()) {
         unsigned inputIndex = blockArg.getArgNumber();
-        OpOperand *input = op.getInputOperand(inputIndex);
-        OpOperand *output = op.getOutputOperand(outputIndex);
+        OpOperand *input = op.getDpsInputOperand(inputIndex);
+        OpOperand *output = op.getDpsInitOperand(outputIndex);
         emitter.copies.emplace_back(
             CopyEmitter::Descriptor{input->get(),
                                     op.getMatchingIndexingMap(input)},
@@ -885,6 +887,271 @@ struct LinalgFillConversion : public OpRewritePattern<linalg::FillOp> {
   }
 };
 
+struct LinalgExtPackConversion
+    : public OpRewritePattern<IREE::LinalgExt::PackOp> {
+  using OpRewritePattern::OpRewritePattern;
+  static bool isSupportedElementTypes(Type inElType, Type outElType) {
+    if (inElType.isF32() && outElType.isF32()) {
+      return true;
+    }
+    if (inElType.isSignlessInteger(8) && inElType.isSignlessInteger(8)) {
+      return true;
+    }
+    if (inElType.isSignlessInteger(32) && inElType.isSignlessInteger(32)) {
+      return true;
+    }
+    return false;
+  }
+
+  LogicalResult matchAndRewrite(IREE::LinalgExt::PackOp op,
+                                PatternRewriter &rewriter) const override {
+    MemRefType inType = op.getInputType().cast<MemRefType>();
+    MemRefType outType = op.getOutputType().cast<MemRefType>();
+
+    if (!isSupportedElementTypes(inType.getElementType(),
+                                 outType.getElementType())) {
+      return rewriter.notifyMatchFailure(
+          op, "unsupported combination of in/out element types");
+    }
+
+    if (inType.getRank() != 2) {
+      return rewriter.notifyMatchFailure(op, "expected input to be 2D");
+    }
+
+    if (outType.getRank() != 4) {
+      return rewriter.notifyMatchFailure(op, "expected output to be 4D");
+    }
+
+    int64_t innerDimsPos[2] = {0, 1};
+    if (ArrayAttr innerDimsPosAttr = op.getInnerDimsPosAttr()) {
+      innerDimsPos[0] = innerDimsPosAttr[0].cast<IntegerAttr>().getInt();
+      innerDimsPos[1] = innerDimsPosAttr[1].cast<IntegerAttr>().getInt();
+    }
+
+    int64_t outerDimsPerm[2] = {0, 1};
+    if (ArrayAttr outerDimsPermAttr = op.getOuterDimsPermAttr()) {
+      outerDimsPerm[0] = outerDimsPermAttr[0].cast<IntegerAttr>().getInt();
+      outerDimsPerm[1] = outerDimsPermAttr[1].cast<IntegerAttr>().getInt();
+    }
+
+    int flags = 0;
+
+    if (innerDimsPos[0] == 0 && innerDimsPos[1] == 1) {
+      // nothing to do
+    } else if (innerDimsPos[0] == 1 && innerDimsPos[1] == 0) {
+      flags |= IREE_UK_FLAG_PACK_TRANSPOSE_INNER;
+    } else {
+      return rewriter.notifyMatchFailure(op, "unsupported inner_dims_pos");
+    }
+
+    if (outerDimsPerm[0] == 0 && outerDimsPerm[1] == 1) {
+      // nothing to do
+    } else if (outerDimsPerm[0] == 1 && outerDimsPerm[1] == 0) {
+      flags |= IREE_UK_FLAG_PACK_TRANSPOSE_OUTER;
+    } else {
+      return rewriter.notifyMatchFailure(op, "unsupported outer_dims_perm");
+    }
+
+    SmallVector<int64_t> inStrides;
+    int64_t inOffset;
+    if (failed(mlir::getStridesAndOffset(inType, inStrides, inOffset))) {
+      return rewriter.notifyMatchFailure(
+          op, "failed to getStridesAndOffset for input");
+    }
+
+    if (inStrides[1] != 1) {
+      return rewriter.notifyMatchFailure(
+          op, "unsupported input layout with non-contiguous inner dimension");
+    }
+
+    if (!verifyMemRefInnerDimsContiguousRowMajor(outType)) {
+      return rewriter.notifyMatchFailure(
+          op,
+          "expected the output's inner dimensions to be contiguous row-major");
+    }
+
+    StridedBufferAnalysis inAnalysis(op.getInput());
+    StridedBufferAnalysis outAnalysis(op.getOutput());
+
+    if (!inAnalysis.isValid()) {
+      return rewriter.notifyMatchFailure(
+          op, "could not compute buffer descriptor for input");
+    }
+
+    if (!outAnalysis.isValid()) {
+      return rewriter.notifyMatchFailure(
+          op, "could not compute buffer descriptor for output");
+    }
+
+    Location loc = op.getLoc();
+
+    Value paddingValue = op.getPaddingValue();
+    if (!paddingValue) {
+      paddingValue = rewriter.create<arith::ConstantOp>(
+          loc, rewriter.getZeroAttr(inType.getElementType()),
+          inType.getElementType());
+    }
+
+    StridedBufferDescriptor &inDesc = inAnalysis.getDesc(rewriter);
+    StridedBufferDescriptor &outDesc = outAnalysis.getDesc(rewriter);
+
+    Value inBuffer = inDesc.castToLinear(loc, rewriter);
+    Value outBuffer = outDesc.castToLinear(loc, rewriter);
+    Value inSize0 = inDesc.sizes[0];
+    Value inSize1 = inDesc.sizes[1];
+    Value inStride0 = inDesc.strides[0];
+    Value outSize0 = outDesc.sizes[0];
+    Value outSize1 = outDesc.sizes[1];
+    Value outSize2 = outDesc.sizes[2];
+    Value outSize3 = outDesc.sizes[3];
+    Value outStride0 = outDesc.strides[0];
+
+    rewriter.replaceOpWithNewOp<IREE::VMVX::PackOp>(
+        op,
+        // input
+        inBuffer, inDesc.offset, inStride0,
+        // output
+        outBuffer, outDesc.offset, outStride0,
+        // input shape
+        inSize0, inSize1,
+        // output shape
+        outSize0, outSize1, outSize2, outSize3, paddingValue,
+        // flags
+        inDesc.getElementTypeAttr(), outDesc.getElementTypeAttr(),
+        rewriter.getI32IntegerAttr(flags));
+    return success();
+  }
+};
+
+struct LinalgExtUnpackConversion
+    : public OpRewritePattern<IREE::LinalgExt::UnPackOp> {
+  using OpRewritePattern::OpRewritePattern;
+  static bool isSupportedElementTypes(Type inElType, Type outElType) {
+    if (inElType.isF32() && outElType.isF32()) {
+      return true;
+    }
+    if (inElType.isSignlessInteger(8) && inElType.isSignlessInteger(8)) {
+      return true;
+    }
+    if (inElType.isSignlessInteger(32) && inElType.isSignlessInteger(32)) {
+      return true;
+    }
+    return false;
+  }
+
+  LogicalResult matchAndRewrite(IREE::LinalgExt::UnPackOp op,
+                                PatternRewriter &rewriter) const override {
+    MemRefType inType = op.getInputType().cast<MemRefType>();
+    MemRefType outType = op.getOutputType().cast<MemRefType>();
+
+    if (!isSupportedElementTypes(inType.getElementType(),
+                                 outType.getElementType())) {
+      return rewriter.notifyMatchFailure(
+          op, "unsupported combination of in/out element types");
+    }
+
+    if (inType.getRank() != 4) {
+      return rewriter.notifyMatchFailure(op, "expected input to be 4D");
+    }
+
+    if (outType.getRank() != 2) {
+      return rewriter.notifyMatchFailure(op, "expected output to be 2D");
+    }
+
+    int64_t innerDimsPos[2] = {0, 1};
+    if (ArrayAttr innerDimsPosAttr = op.getInnerDimsPosAttr()) {
+      innerDimsPos[0] = innerDimsPosAttr[0].cast<IntegerAttr>().getInt();
+      innerDimsPos[1] = innerDimsPosAttr[1].cast<IntegerAttr>().getInt();
+    }
+
+    int64_t outerDimsPerm[2] = {0, 1};
+    if (ArrayAttr outerDimsPermAttr = op.getOuterDimsPermAttr()) {
+      outerDimsPerm[0] = outerDimsPermAttr[0].cast<IntegerAttr>().getInt();
+      outerDimsPerm[1] = outerDimsPermAttr[1].cast<IntegerAttr>().getInt();
+    }
+
+    int flags = 0;
+
+    if (innerDimsPos[0] == 0 && innerDimsPos[1] == 1) {
+      // nothing to do
+    } else if (innerDimsPos[0] == 1 && innerDimsPos[1] == 0) {
+      flags |= IREE_UK_FLAG_UNPACK_TRANSPOSE_INNER;
+    } else {
+      return rewriter.notifyMatchFailure(op, "unsupported inner_dims_pos");
+    }
+
+    if (outerDimsPerm[0] == 0 && outerDimsPerm[1] == 1) {
+      // nothing to do
+    } else if (outerDimsPerm[0] == 1 && outerDimsPerm[1] == 0) {
+      flags |= IREE_UK_FLAG_UNPACK_TRANSPOSE_OUTER;
+    } else {
+      return rewriter.notifyMatchFailure(op, "unsupported outer_dims_perm");
+    }
+
+    SmallVector<int64_t> outStrides;
+    int64_t outOffset;
+    if (failed(mlir::getStridesAndOffset(outType, outStrides, outOffset))) {
+      return rewriter.notifyMatchFailure(
+          op, "failed to getStridesAndOffset for output");
+    }
+
+    if (outStrides[1] != 1) {
+      return rewriter.notifyMatchFailure(
+          op, "unsupported output layout with non-contiguous inner dimension");
+    }
+
+    if (!verifyMemRefInnerDimsContiguousRowMajor(inType)) {
+      return rewriter.notifyMatchFailure(
+          op,
+          "expected the input's inner dimensions to be contiguous row-major");
+    }
+
+    StridedBufferAnalysis inAnalysis(op.getInput());
+    StridedBufferAnalysis outAnalysis(op.getOutput());
+
+    if (!inAnalysis.isValid()) {
+      return rewriter.notifyMatchFailure(
+          op, "could not compute buffer descriptor for input");
+    }
+
+    if (!outAnalysis.isValid()) {
+      return rewriter.notifyMatchFailure(
+          op, "could not compute buffer descriptor for output");
+    }
+
+    Location loc = op.getLoc();
+
+    StridedBufferDescriptor &inDesc = inAnalysis.getDesc(rewriter);
+    StridedBufferDescriptor &outDesc = outAnalysis.getDesc(rewriter);
+
+    Value inBuffer = inDesc.castToLinear(loc, rewriter);
+    Value outBuffer = outDesc.castToLinear(loc, rewriter);
+    Value inSize0 = inDesc.sizes[0];
+    Value inSize1 = inDesc.sizes[1];
+    Value inSize2 = inDesc.sizes[2];
+    Value inSize3 = inDesc.sizes[3];
+    Value inStride0 = inDesc.strides[0];
+    Value outSize0 = outDesc.sizes[0];
+    Value outSize1 = outDesc.sizes[1];
+    Value outStride0 = outDesc.strides[0];
+
+    rewriter.replaceOpWithNewOp<IREE::VMVX::UnpackOp>(
+        op,
+        // input
+        inBuffer, inDesc.offset, inStride0,
+        // output
+        outBuffer, outDesc.offset, outStride0,
+        // input shape
+        inSize0, inSize1, inSize2, inSize3,
+        // output shape
+        outSize0, outSize1,
+        // flags
+        inDesc.getElementTypeAttr(), outDesc.getElementTypeAttr(),
+        rewriter.getI32IntegerAttr(flags));
+    return success();
+  }
+};
+
 bool isMmt4d(ArrayAttr indexingMaps) {
   if (indexingMaps.size() != 3) return false;
 
@@ -931,7 +1198,7 @@ OpType getUserOfType(Value v) {
 }
 
 linalg::FillOp findFillOpSolelyZeroingOutputOf(linalg::LinalgOp op) {
-  Value out = op.getOutputOperand(0)->get();
+  Value out = op.getDpsInitOperand(0)->get();
   if (getNumberOfUses(out) != 2) {
     return nullptr;
   }
@@ -977,10 +1244,10 @@ struct LinalgContractionConversion
           op(llvm::cast<linalg::LinalgOp>(contract.getOperation())),
           lhsAnal(contract.lhs()),
           rhsAnal(contract.rhs()),
-          outAnal(op.getOutputs().front()) {
+          outAnal(op.getDpsInitOperands().front()->get()) {
       lhs = contract.lhs();
       rhs = contract.rhs();
-      out = op.getOutputs().front();
+      out = op.getDpsInitOperands().front()->get();
     }
   };
 
@@ -1046,7 +1313,7 @@ struct LinalgContractionConversion
     if (linalg::FillOp fillOp = findFillOpSolelyZeroingOutputOf(info.op)) {
       rewriter.eraseOp(fillOp);  // let the matmul overwrite the accumulator.
     } else {
-      flags |= IREE_VMVX_MATMUL_FLAG_ACCUMULATE;  // accumulate into existing.
+      flags |= IREE_UK_FLAG_ACCUMULATE;  // accumulate into existing.
     }
 
     auto &lhsDesc = info.lhsAnal.getDesc(rewriter);
@@ -1084,7 +1351,7 @@ struct LinalgContractionConversion
     if (linalg::FillOp fillOp = findFillOpSolelyZeroingOutputOf(info.op)) {
       rewriter.eraseOp(fillOp);  // let the matmul overwrite the accumulator.
     } else {
-      flags |= IREE_VMVX_MATMUL_FLAG_ACCUMULATE;  // accumulate into existing.
+      flags |= IREE_UK_FLAG_ACCUMULATE;  // accumulate into existing.
     }
 
     auto &lhsDesc = info.lhsAnal.getDesc(rewriter);
@@ -1151,7 +1418,8 @@ class VMVXLowerLinalgMicrokernelsPass
       RewritePatternSet patterns(&getContext());
       patterns
           .insert<LinalgBinaryGenericConversion, LinalgFillConversion,
-                  LinalgTrivialGenericConversion, LinalgUnaryGenericConversion>(
+                  LinalgTrivialGenericConversion, LinalgUnaryGenericConversion,
+                  LinalgExtPackConversion, LinalgExtUnpackConversion>(
               &getContext());
 
       if (failed(applyPatternsAndFoldGreedily(getOperation(),

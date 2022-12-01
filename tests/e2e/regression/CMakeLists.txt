@@ -16,7 +16,6 @@ iree_lit_test_suite(
   SRCS
     "fill_i64.mlir"
     "globals.mlir"
-    "globals_ml_program.mlir"
     "libm_linking.mlir"
     "scalar.mlir"
     "trace_dispatch_tensors.mlir"
@@ -27,6 +26,8 @@ iree_lit_test_suite(
     iree-opt
     iree-run-mlir
   LABELS
+    "driver=local-task"
+    "driver=vulkan"
     "hostonly"
 )
 
@@ -50,6 +51,7 @@ iree_check_single_backend_test_suite(
     "reduction_broadcast_elementwise.mlir"
     "softmax.mlir"
     "strided_slice.mlir"
+    "transpose.mlir"
   TARGET_BACKEND
     "llvm-cpu"
   DRIVER
@@ -89,6 +91,7 @@ iree_check_single_backend_test_suite(
     "reduction_broadcast_elementwise.mlir"
     "softmax.mlir"
     "strided_slice.mlir"
+    "transpose.mlir"
   TARGET_BACKEND
     "vmvx"
   DRIVER
@@ -114,6 +117,7 @@ iree_check_single_backend_test_suite(
     "reduction_broadcast_elementwise.mlir"
     "softmax.mlir"
     "strided_slice.mlir"
+    "transpose.mlir"
   TARGET_BACKEND
     "vulkan-spirv"
   DRIVER
@@ -141,6 +145,7 @@ iree_check_single_backend_test_suite(
     "reduction_broadcast_elementwise.mlir"
     "softmax.mlir"
     "strided_slice.mlir"
+    "transpose.mlir"
   TARGET_BACKEND
     "cuda"
   DRIVER

@@ -10,6 +10,7 @@
 #include "iree/compiler/Dialect/Flow/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 namespace mlir {
@@ -32,31 +33,46 @@ static FailureOr<Attribute> getZero(OpBuilder &builder, Location loc,
 
 namespace {
 
-/// Converts an linalg.init_tensor op to `flow.tensor.splat` op.
-struct RewriteInitTensorToSplat
-    : public OpRewritePattern<linalg::InitTensorOp> {
-  using OpRewritePattern<linalg::InitTensorOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(linalg::InitTensorOp initTensorOp,
+/// Converts an tensor.empty() op to `flow.tensor.splat` op.
+struct RewriteInitTensorToSplat : public OpRewritePattern<tensor::EmptyOp> {
+  using OpRewritePattern<tensor::EmptyOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(tensor::EmptyOp emptyTensorOp,
                                 PatternRewriter &rewriter) const override {
-    if (llvm::all_of(initTensorOp->getUsers(), [](Operation *user) -> bool {
+    if (llvm::all_of(emptyTensorOp->getUsers(), [](Operation *user) -> bool {
           return isa<linalg::LinalgOp, LinalgExt::LinalgExtOp>(user);
         })) {
       return failure();
     }
 
-    RankedTensorType resultType = initTensorOp.getType();
+    RankedTensorType resultType = emptyTensorOp.getType();
     Type elementType = resultType.getElementType();
-    Location loc = initTensorOp.getLoc();
+    Location loc = emptyTensorOp.getLoc();
     FailureOr<Attribute> zero = getZero(rewriter, loc, elementType);
     if (failed(zero)) {
       return rewriter.notifyMatchFailure(
-          initTensorOp, "unable to get zero value for element type");
+          emptyTensorOp, "unable to get zero value for element type");
     }
     Value value =
         rewriter.create<arith::ConstantOp>(loc, elementType, zero.value());
-    rewriter.replaceOpWithNewOp<TensorSplatOp>(initTensorOp, resultType, value,
-                                               initTensorOp.getSizes());
+    rewriter.replaceOpWithNewOp<TensorSplatOp>(emptyTensorOp, resultType, value,
+                                               emptyTensorOp.getDynamicSizes());
+    return success();
+  }
+};
+
+/// Converts an tensor.empty() op to `flow.tensor.empty` op.
+struct RewriteInitTensorToEmpty : public OpRewritePattern<tensor::EmptyOp> {
+  using OpRewritePattern<tensor::EmptyOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(tensor::EmptyOp emptyTensorOp,
+                                PatternRewriter &rewriter) const override {
+    if (llvm::all_of(emptyTensorOp->getUsers(), [](Operation *user) -> bool {
+          return isa<linalg::LinalgOp, LinalgExt::LinalgExtOp>(user);
+        })) {
+      return failure();
+    }
+    RankedTensorType resultType = emptyTensorOp.getType();
+    rewriter.replaceOpWithNewOp<TensorEmptyOp>(emptyTensorOp, resultType,
+                                               emptyTensorOp.getDynamicSizes());
     return success();
   }
 };
@@ -68,13 +84,18 @@ struct InitializeEmptyTensorsPass
     registry.insert<arith::ArithDialect, IREE::Flow::FlowDialect,
                     linalg::LinalgDialect>();
   }
-  InitializeEmptyTensorsPass() = default;
-  InitializeEmptyTensorsPass(const InitializeEmptyTensorsPass &) {}
+  InitializeEmptyTensorsPass(bool zeroFill) { this->zeroFill = zeroFill; }
+  InitializeEmptyTensorsPass(const InitializeEmptyTensorsPass &pass)
+      : InitializeEmptyTensorsPass(pass.zeroFill) {}
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(context);
-    patterns.insert<RewriteInitTensorToSplat>(context);
+    if (zeroFill) {
+      patterns.insert<RewriteInitTensorToSplat>(context);
+    } else {
+      patterns.insert<RewriteInitTensorToEmpty>(context);
+    }
     if (failed(applyPatternsAndFoldGreedily(getOperation(),
                                             std::move(patterns)))) {
       return signalPassFailure();
@@ -84,8 +105,8 @@ struct InitializeEmptyTensorsPass
 
 }  // namespace
 
-std::unique_ptr<Pass> createInitializeEmptyTensorsPass() {
-  return std::make_unique<InitializeEmptyTensorsPass>();
+std::unique_ptr<Pass> createInitializeEmptyTensorsPass(bool zeroFill) {
+  return std::make_unique<InitializeEmptyTensorsPass>(zeroFill);
 }
 
 }  // namespace Flow

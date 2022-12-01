@@ -26,6 +26,12 @@ def CleanupNumericNarrowing :
   let constructor = "mlir::iree_compiler::IREE::Flow::createCleanupNumericNarrowingPass()";
 }
 
+def CollapseDims :
+    Pass<"iree-flow-collapse-dims", ""> {
+  let summary = "Collapse reduction dimensions when possible.";
+  let constructor = "mlir::iree_compiler::IREE::Flow::createCollapseDimsPass()";
+}
+
 def Convert1X1FilterConv2DToMatmul:
     Pass<"iree-flow-convert-1x1-filter-conv2d-to-matmul", ""> {
   let summary = "Convert linalg convolution ops with 1x1 kernels into linalg matrix multiplication ops.";
@@ -69,13 +75,9 @@ def DispatchLinalgOnTensors :
   let options = [
     Option<"aggressiveFusion", "aggressive-fusion", "bool",
            /*default=*/"false", "Fuse with aggressive heuristics">,
+    Option<"generateWorkloadRegion", "genereate-workload-region", "bool",
+           /*default=*/"true", "Generate workload regions of WorkgroupOps">,
   ];
-}
-
-def DispatchLinalgOnTensorsViaRegionOps :
-    InterfacePass<"iree-flow-dispatch-linalg-on-tensors-via-regionops-pass", "mlir::FunctionOpInterface"> {
-  let summary = "Dispatch Linalg operations on tensors by using tile and distribute (via DispatchRegionOps)";
-  let constructor = "mlir::iree_compiler::IREE::Flow::createDispatchLinalgOnTensorsViaRegionOpsPass()";
 }
 
 def DispatchWithTransformDialect :
@@ -121,6 +123,10 @@ def InferNumericNarrowing :
 
 def InitializeEmptyTensors : Pass<"iree-flow-initialize-empty-tensors", ""> {
   let summary = "Initialize empty tensors";
+  let options = [
+    Option<"zeroFill", "zero-fill", "bool", /*default=*/"false",
+           "Fills empty tensors with zeros.">,
+  ];
   let constructor = "mlir::iree_compiler::IREE::Flow::createInitializeEmptyTensorsPass()";
 }
 
@@ -174,6 +180,16 @@ def ConvertLinalgMatmulToMmt4D :
     Option<"enableGenericSlow", "enable_generic_slow", "bool",
            /*default=*/"false",
            "For tests only. Use mmt4d even for cases that are not expected to compile to efficient code by using some arbitrary generic tile shape.">,
+  ];
+}
+
+def SetEncoding : Pass<"iree-flow-set-encoding", ""> {
+  let summary = "Introduce tensor encoding for compute operations";
+  let constructor = "mlir::iree_compiler::IREE::Flow::createSetEncodingPass()";
+  let options = [
+    Option<"defaultPadding", "default-padding", "int64_t",
+           /*default=*/"16",
+           "Default padding to use so packing can be done without padding during the packing">
   ];
 }
 

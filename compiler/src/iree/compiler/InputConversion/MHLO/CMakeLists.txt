@@ -68,6 +68,7 @@ iree_cc_library(
     MLIRIR
     MLIRLinalgDialect
     MLIRLinalgTransforms
+    MLIRMLProgramDialect
     MLIRMathDialect
     MLIRMemRefDialect
     MLIRMhloUtils
@@ -90,10 +91,12 @@ iree_cc_library(
     MhloToMemrefConversion
     MhloToStandard
     StablehloBroadcastUtils
+    StablehloToMhlo
     iree::compiler::Dialect::Flow::IR
     iree::compiler::Dialect::Util::IR
     iree::compiler::Dialect::Util::Transforms
     iree::compiler::InputConversion::Common
+    iree::compiler::Utils
     tensorflow::external_mhlo_includes
   DEFINES
     "IREE_HAVE_MHLO_INPUT"

@@ -25,6 +25,8 @@
 extern "C" {
 #endif  // __cplusplus
 
+typedef struct iree_allocator_t iree_allocator_t;
+
 //===----------------------------------------------------------------------===//
 // IREE_STATUS_FEATURE flags and IREE_STATUS_MODE setting
 //===----------------------------------------------------------------------===//
@@ -320,7 +322,7 @@ typedef struct iree_status_handle_t* iree_status_t;
 #undef IREE_STATUS_IMPL_CHECK_OK_
 #define IREE_STATUS_IMPL_CHECK_OK_(var, expr) \
   iree_status_t var = (expr);                 \
-  if (IREE_UNLIKELY(!iree_status_is_ok(var))) abort();
+  if (IREE_UNLIKELY(!iree_status_is_ok(var))) iree_abort();
 #else
 #define IREE_STATUS_IMPL_MAKE_(...) \
   IREE_STATUS_IMPL_MAKE_SWITCH_(__FILE__, __LINE__, __VA_ARGS__)
@@ -498,6 +500,31 @@ IREE_API_EXPORT bool iree_status_format(iree_status_t status,
                                         char* buffer,
                                         iree_host_size_t* out_buffer_length);
 
+// Converts the status to an allocated string value using the given allocator.
+// |out_buffer| will contain |out_buffer_length| characters as well as a NUL
+// terminator. The caller must free the buffer with |allocator|.
+//
+// NOTE: |allocator| is passed as a pointer to avoid a circular dependency with
+// iree/base/allocator.h (which uses this file a lot more than this file uses
+// it) and must be non-NULL.
+//
+// Example:
+//  iree_allocator_t allocator = iree_allocator_system();
+//  char* buffer = NULL;
+//  iree_host_size_t length = 0;
+//  if (iree_status_to_string(status, &allocator, &buffer, &length)) {
+//    // |buffer| is NUL terminated but if possible use the length.
+//    LOG_MESSAGE("%.*s", (int)length, buffer);
+//    iree_allocator_free(allocator, buffer);
+//  } else {
+//    // Could still use iree_status_code_string to get the status code string.
+//    LOG_MESSAGE("failed to convert status to string");
+//  }
+IREE_API_EXPORT bool iree_status_to_string(iree_status_t status,
+                                           const iree_allocator_t* allocator,
+                                           char** out_buffer,
+                                           iree_host_size_t* out_buffer_length);
+
 // Prints |status| to the given |file| as a string with all available
 // annotations. This will produce multiple lines of output and should be used
 // only when dumping a status on failure.
@@ -505,6 +532,12 @@ IREE_API_EXPORT void iree_status_fprint(FILE* file, iree_status_t status);
 
 #ifdef __cplusplus
 }  // extern "C"
+#endif  // __cplusplus
+
+// Optional C++ iree::Status wrapper.
+// This makes it easier to safely use iree_status_t in C++ code and not leak.
+#ifdef __cplusplus
+#include "iree/base/status_cc.h"
 #endif  // __cplusplus
 
 #endif  // IREE_BASE_STATUS_H_

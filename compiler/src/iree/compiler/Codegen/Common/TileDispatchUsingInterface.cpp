@@ -8,9 +8,9 @@
 
 #include "iree/compiler/Codegen/Common/Transforms.h"
 #include "iree/compiler/Codegen/Interfaces/PartitionableLoopsInterface.h"
+#include "iree/compiler/Codegen/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
-#include "iree/compiler/Utils/GraphUtils.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/ViewLikeInterfaceUtils.h"
@@ -23,6 +23,7 @@
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/TilingInterface.h"
+#include "mlir/Transforms/TopologicalSortUtils.h"
 
 #define DEBUG_TYPE "tile-dispatch-using-interface"
 
@@ -222,9 +223,12 @@ static LogicalResult replaceStoreWithTiledVersion(
   SmallVector<OpFoldResult> tileStrides(tileOffsets.size(),
                                         rewriter.getIndexAttr(1));
   SmallVector<OpFoldResult> combinedOffsets, combinedSizes, combinedStrides;
+  SliceAndDynamicDims clonedSliceAndVals =
+      cloneOffsetsSizesAndStrides(rewriter, storeOp);
+
   if (failed(mergeOffsetsSizesAndStrides(
-          rewriter, storeOp.getLoc(), storeOp.getMixedOffsets(),
-          storeOp.getMixedSizes(), storeOp.getMixedStrides(),
+          rewriter, storeOp.getLoc(), clonedSliceAndVals.offsets,
+          clonedSliceAndVals.sizes, clonedSliceAndVals.strides,
           storeOp.getDroppedDims(), tileOffsets, tileSizes, tileStrides,
           combinedOffsets, combinedSizes, combinedStrides))) {
     return rewriter.notifyMatchFailure(
@@ -233,7 +237,8 @@ static LogicalResult replaceStoreWithTiledVersion(
 
   rewriter.create<IREE::Flow::DispatchTensorStoreOp>(
       storeOp.getLoc(), tiledValue, storeOp.getTarget(),
-      storeOp.getTargetDims(), combinedOffsets, combinedSizes, combinedStrides);
+      clonedSliceAndVals.dynamicDims, combinedOffsets, combinedSizes,
+      combinedStrides);
   rewriter.eraseOp(storeOp);
   return success();
 }
@@ -283,7 +288,7 @@ struct TileDispatchUsingSCFForOp
   /// Construct a generic pattern applied to all TilingInterface ops.
   TileDispatchUsingSCFForOp(MLIRContext *context,
                             linalg::LinalgTilingOptions options,
-                            linalg::LinalgTransformationFilter filter,
+                            IREE::LinalgExt::LinalgTransformationFilter filter,
                             PatternBenefit benefit = 1)
       : OpInterfaceRewritePattern<TilingInterface>(context, benefit),
         options(std::move(options)),
@@ -292,7 +297,7 @@ struct TileDispatchUsingSCFForOp
   /// Construct a generic pattern applied to `opName`.
   TileDispatchUsingSCFForOp(StringRef opName, MLIRContext *context,
                             linalg::LinalgTilingOptions options,
-                            linalg::LinalgTransformationFilter filter,
+                            IREE::LinalgExt::LinalgTransformationFilter filter,
                             PatternBenefit benefit = 1)
       : OpInterfaceRewritePattern<TilingInterface>(context, benefit),
         options(std::move(options)),
@@ -313,7 +318,7 @@ struct TileDispatchUsingSCFForOp
   linalg::LinalgTilingOptions options;
 
   /// Filter to control transformation.
-  linalg::LinalgTransformationFilter filter;
+  IREE::LinalgExt::LinalgTransformationFilter filter;
 };
 }  // namespace
 
@@ -505,18 +510,19 @@ struct TileAndFuseResult {
 struct TileAndFuseDispatchUsingSCFForOp
     : public OpInterfaceRewritePattern<TilingInterface> {
   /// Construct a generic pattern applied to all TilingInterface ops.
-  TileAndFuseDispatchUsingSCFForOp(MLIRContext *context,
-                                   linalg::LinalgTilingOptions options,
-                                   linalg::LinalgTransformationFilter filter,
-                                   PatternBenefit benefit = 1)
+  TileAndFuseDispatchUsingSCFForOp(
+      MLIRContext *context, linalg::LinalgTilingOptions options,
+      IREE::LinalgExt::LinalgTransformationFilter filter,
+      PatternBenefit benefit = 1)
       : OpInterfaceRewritePattern<TilingInterface>(context, benefit),
         tilingPattern(context, options, filter) {}
 
   /// Construct a generic pattern applied to `opName`.
-  TileAndFuseDispatchUsingSCFForOp(StringRef opName, MLIRContext *context,
-                                   linalg::LinalgTilingOptions options,
-                                   linalg::LinalgTransformationFilter filter,
-                                   PatternBenefit benefit = 1)
+  TileAndFuseDispatchUsingSCFForOp(
+      StringRef opName, MLIRContext *context,
+      linalg::LinalgTilingOptions options,
+      IREE::LinalgExt::LinalgTransformationFilter filter,
+      PatternBenefit benefit = 1)
       : OpInterfaceRewritePattern<TilingInterface>(context, benefit),
         tilingPattern(context, options, filter) {}
 
@@ -534,7 +540,7 @@ struct TileAndFuseDispatchUsingSCFForOp
 }  // namespace
 
 /// Find all producers to fuse and return them in sorted order;
-static std::vector<Operation *> getAllFusableProducers(TilingInterface op) {
+static SmallVector<Operation *> getAllFusableProducers(TilingInterface op) {
   llvm::SetVector<Operation *> producers;
   std::deque<Operation *> worklist;
   worklist.push_back(op);
@@ -554,7 +560,8 @@ static std::vector<Operation *> getAllFusableProducers(TilingInterface op) {
     }
   }
 
-  std::vector<Operation *> sortedOps = sortOpsTopologically(producers);
+  SmallVector<Operation *> sortedOps(producers.begin(), producers.end());
+  mlir::computeTopologicalSorting(sortedOps);
   return sortedOps;
 }
 
@@ -578,7 +585,7 @@ FailureOr<TileAndFuseResult>
 TileAndFuseDispatchUsingSCFForOp::returningMatchAndRewrite(
     TilingInterface op, PatternRewriter &rewriter) const {
   TileAndFuseResult tileAndFuseResult;
-  std::vector<Operation *> fusableProducers = getAllFusableProducers(op);
+  auto fusableProducers = getAllFusableProducers(op);
   // Apply the tiling pattern.
   FailureOr<TilingResult> tilingResult =
       tilingPattern.returningMatchAndRewrite(op, rewriter);
@@ -742,9 +749,8 @@ struct SwapExtractSliceWithInitTensor
 
   LogicalResult matchAndRewrite(tensor::ExtractSliceOp sliceOp,
                                 PatternRewriter &rewriter) const override {
-    auto initTensorOp =
-        sliceOp.getSource().getDefiningOp<linalg::InitTensorOp>();
-    if (!initTensorOp) return failure();
+    auto emptyTensorOp = sliceOp.getSource().getDefiningOp<tensor::EmptyOp>();
+    if (!emptyTensorOp) return failure();
 
     SmallVector<OpFoldResult> mixedSizes = sliceOp.getMixedSizes();
     if (mixedSizes.size() != sliceOp.getType().getRank()) {
@@ -757,7 +763,7 @@ struct SwapExtractSliceWithInitTensor
       }
       std::swap(mixedSizes, rankReducedMixedSizes);
     }
-    rewriter.replaceOpWithNewOp<linalg::InitTensorOp>(
+    rewriter.replaceOpWithNewOp<tensor::EmptyOp>(
         sliceOp, mixedSizes, sliceOp.getType().getElementType());
     return success();
   }
@@ -767,7 +773,7 @@ struct SwapExtractSliceWithInitTensor
 
 void populateTileAndDistributeToWorkgroupsPatterns(
     RewritePatternSet &patterns, linalg::LinalgTilingOptions options,
-    linalg::LinalgTransformationFilter filter) {
+    IREE::LinalgExt::LinalgTransformationFilter filter) {
   MLIRContext *context = patterns.getContext();
   patterns.insert<TileAndFuseDispatchUsingSCFForOp>(context, std::move(options),
                                                     std::move(filter));

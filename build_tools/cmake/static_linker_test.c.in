@@ -97,8 +97,7 @@ iree_status_t Run() {
 
   // Instance configuration (this should be shared across sessions).
   iree_runtime_instance_options_t instance_options;
-  iree_runtime_instance_options_initialize(IREE_API_VERSION_LATEST,
-                                           &instance_options);
+  iree_runtime_instance_options_initialize(&instance_options);
   iree_runtime_instance_options_use_all_available_drivers(&instance_options);
   iree_runtime_instance_t* instance = NULL;
 
@@ -153,8 +152,8 @@ iree_status_t Run() {
 
   for (int i = 0; i < IREE_INPUT_NUM; ++i) {
     if (iree_status_is_ok(status)) {
-      arg_buffers[i] = (IREE_INPUT_TYPE*)aligned_alloc(
-          sizeof(iree_device_size_t), sizeof(IREE_INPUT_TYPE) * size[i]);
+      arg_buffers[i] = (IREE_INPUT_TYPE*)malloc(
+          sizeof(IREE_INPUT_TYPE) * size[i]);
       if (arg_buffers[i] == NULL) {
         status = iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED);
       }

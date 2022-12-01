@@ -38,8 +38,8 @@ static Value expandTo4D(mlir::Location loc, PatternRewriter &rewriter,
   // where M0, N0 are always static and M1, N1 are static if and only if M, N
   // are.
   for (int i : {0, 1}) {
-    if (inputShape[i] == ShapedType::kDynamicSize) {
-      targetShape[2 * i] = ShapedType::kDynamicSize;
+    if (inputShape[i] == ShapedType::kDynamic) {
+      targetShape[2 * i] = ShapedType::kDynamic;
     } else {
       targetShape[2 * i] = inputShape[i] / tileShape[i];
     }
@@ -70,7 +70,7 @@ static Value transpose(mlir::Location loc, PatternRewriter &rewriter,
   ArrayRef<int64_t> inputShape = inputType.getShape();
   SmallVector<OpFoldResult, 4> targetShape;
   for (int i = 0; i < 4; i++) {
-    if (inputShape[indices[i]] == ShapedType::kDynamicSize) {
+    if (inputShape[indices[i]] == ShapedType::kDynamic) {
       targetShape.emplace_back(
           rewriter.create<tensor::DimOp>(loc, input, indices[i]));
     } else {
@@ -78,10 +78,11 @@ static Value transpose(mlir::Location loc, PatternRewriter &rewriter,
     }
   }
 
-  Value outputTensor = rewriter.create<linalg::InitTensorOp>(
+  Value outputTensor = rewriter.create<tensor::EmptyOp>(
       loc, targetShape, inputType.getElementType());
 
-  SmallVector<StringRef, 4> loopAttributeTypes(nloops, "parallel");
+  SmallVector<utils::IteratorType, 4> loopAttributeTypes(
+      nloops, utils::IteratorType::parallel);
 
   SmallVector<AffineMap, 2> indexingMaps = {
       inversePermutation(
@@ -120,7 +121,7 @@ static bool needsPadding(ArrayRef<int64_t> inputShape,
                          ArrayRef<int64_t> tileShape) {
   assert(inputShape.size() == tileShape.size());
   for (int i = 0; i < inputShape.size(); i++) {
-    if (inputShape[i] == ShapedType::kDynamicSize) {
+    if (inputShape[i] == ShapedType::kDynamic) {
       return true;
     }
     if (inputShape[i] % tileShape[i] != 0) {
@@ -148,8 +149,8 @@ static Value pad(Location loc, PatternRewriter &rewriter, Value input,
     // 'High' padding i.e. padding at the bottom and on the right, and the
     // result type shape, will be dynamic in any dimension if and only if the
     // input shape is.
-    if (inputShape[i] == ShapedType::kDynamicSize) {
-      resultTypeShape.push_back(ShapedType::kDynamicSize);
+    if (inputShape[i] == ShapedType::kDynamic) {
+      resultTypeShape.push_back(ShapedType::kDynamic);
       // There only remains to compute the 'high' padding Value.
       auto add = [&](Value a, Value b) {
         return rewriter.create<arith::AddIOp>(loc, a, b);
@@ -189,9 +190,8 @@ static Value pad(Location loc, PatternRewriter &rewriter, Value input,
       RankedTensorType::get(resultTypeShape, elementType);
   Value padValue = rewriter.create<arith::ConstantOp>(
       loc, elementType, rewriter.getZeroAttr(elementType));
-  return tensor::createPadScalarOp(resultType, input, padValue, lowPadding,
-                                   highPadding,
-                                   /* nofold = */ false, loc, rewriter);
+  return rewriter.create<tensor::PadOp>(loc, resultType, input, lowPadding,
+                                        highPadding, padValue);
 }
 
 // Returns a top-left slice from |input| shaped like |likeWhat|.
@@ -204,7 +204,7 @@ static Value extractSliceLike(Location loc, PatternRewriter &rewriter,
   for (int i = 0; i < rank; ++i) {
     offsets.push_back(rewriter.getIndexAttr(0));
     strides.push_back(rewriter.getIndexAttr(1));
-    if (resultShape[i] == ShapedType::kDynamicSize) {
+    if (resultShape[i] == ShapedType::kDynamic) {
       dims.emplace_back(rewriter.create<tensor::DimOp>(loc, likeWhat, i));
     } else {
       dims.push_back(rewriter.getIndexAttr(resultShape[i]));
@@ -254,9 +254,9 @@ class LinalgMatmulOpToLinalgMmt4DOpPattern
                                 PatternRewriter &rewriter) const override {
     Location loc = matmulOp.getLoc();
 
-    Value lhs = matmulOp.getInputOperand(0)->get();
-    Value rhs = matmulOp.getInputOperand(1)->get();
-    Value acc = matmulOp.getOutputOperand(0)->get();
+    Value lhs = matmulOp.getDpsInputOperand(0)->get();
+    Value rhs = matmulOp.getDpsInputOperand(1)->get();
+    Value acc = matmulOp.getDpsInitOperand(0)->get();
 
     // This transformation supports any mixing of static and dynamic dimensions,
     // with one exception: the dynamic-ness of each dimension of the accumulator
@@ -390,15 +390,15 @@ LinalgMatmulOpToLinalgMmt4DOpPattern::chooseTileParams(Value lhs, Value rhs,
   return llvm::None;
 }
 
-/// Canonicalizes [linalg.init_tensor -> linalg.fill -> linalg.generic] ->
-/// [linalg.init_tensor -> linalg.fill] where linalg.generic does only copy e.g
+/// Canonicalizes [tensor.empty() -> linalg.fill -> linalg.generic] ->
+/// [tensor.empty() -> linalg.fill] where linalg.generic does only copy e.g
 /// a transpose.
 struct FoldFillGenericOpPattern : public OpRewritePattern<linalg::GenericOp> {
   using OpRewritePattern<linalg::GenericOp>::OpRewritePattern;
   LogicalResult matchAndRewrite(linalg::GenericOp genericOp,
                                 PatternRewriter &rewriter) const override {
-    if (genericOp.getNumInputs() != 1) return failure();
-    if (genericOp.getNumOutputs() != 1) return failure();
+    if (genericOp.getNumDpsInputs() != 1) return failure();
+    if (genericOp.getNumDpsInits() != 1) return failure();
 
     // Check linalg.generic does have copy only semantics.
     if (genericOp.getNumParallelLoops() != genericOp.getNumLoops()) {
@@ -424,7 +424,7 @@ struct FoldFillGenericOpPattern : public OpRewritePattern<linalg::GenericOp> {
     if (!fillOp) return failure();
 
     auto loc = genericOp.getLoc();
-    Value newInitTensor = rewriter.create<linalg::InitTensorOp>(
+    Value newInitTensor = rewriter.create<tensor::EmptyOp>(
         loc, outputType.getShape(), outputType.getElementType());
     rewriter.replaceOpWithNewOp<linalg::FillOp>(genericOp, fillOp.value(),
                                                 newInitTensor);
@@ -464,7 +464,7 @@ class ConvertLinalgMatmulToMmt4DPass final
     {
       RewritePatternSet patterns(&getContext());
       tensor::ExpandShapeOp::getCanonicalizationPatterns(patterns, context);
-      linalg::InitTensorOp::getCanonicalizationPatterns(patterns, context);
+      tensor::EmptyOp::getCanonicalizationPatterns(patterns, context);
       linalg::FillOp::getCanonicalizationPatterns(patterns, context);
       patterns.insert<FoldFillGenericOpPattern>(context);
       if (failed(applyPatternsAndFoldGreedily(getOperation(),

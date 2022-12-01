@@ -7,18 +7,23 @@
 #include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtOps.h"
 
 #include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtDialect.h"
+#include "iree-dialects/Dialect/LinalgExt/Utils/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Affine/Utils.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tensor/Utils/Utils.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/FunctionImplementation.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/OpImplementation.h"
@@ -81,31 +86,52 @@ static Value getSlice(OpBuilder &b, Location loc, Value source,
       .Default([&](Type t) { return nullptr; });
 }
 
-/// Returns true if the dimensions of ShapedType aren't dynamic or aren't equal.
-static bool isShapedTypeDimEqual(int64_t lhs, int64_t rhs) {
-  return lhs != ShapedType::kDynamicSize && rhs != ShapedType::kDynamicSize &&
-         lhs != rhs;
+/// Returns true if the dimensions of ShapedType are compatible.
+static bool isShapedTypeDimCompatible(int64_t lhs, int64_t rhs) {
+  return lhs == ShapedType::kDynamic || rhs == ShapedType::kDynamic ||
+         lhs == rhs;
 }
 
-Value IREE::LinalgExt::getDimValue(OpBuilder &builder, Location loc, Value v,
-                                   int64_t dim) {
-  return TypeSwitch<Type, Value>(v.getType())
-      .Case<RankedTensorType>([&](RankedTensorType t) -> Value {
-        return builder.create<tensor::DimOp>(loc, v, dim);
-      })
-      .Case<MemRefType>([&](MemRefType t) -> Value {
-        return builder.create<memref::DimOp>(loc, v, dim);
-      })
-      .Default([&](Type t) { return Value(); });
-}
-
-OpFoldResult IREE::LinalgExt::getDim(OpBuilder &builder, Location loc, Value v,
-                                     int64_t dim) {
-  auto t = v.getType().cast<ShapedType>();
-  if (t.isDynamicDim(dim)) {
-    return getDimValue(builder, loc, v, dim);
+/// Returns true if the dimensions of ShapedType are compatible.
+static bool areShapesCompatible(ArrayRef<int64_t> lhs, ArrayRef<int64_t> rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
   }
-  return builder.getI64IntegerAttr(t.getDimSize(dim));
+  return llvm::all_of(llvm::zip(lhs, rhs), [](std::tuple<int64_t, int64_t> it) {
+    return isShapedTypeDimCompatible(std::get<0>(it), std::get<1>(it));
+  });
+}
+
+/// Return true if `dimsPos` is invalid. It is invalid when: a) it contains
+/// duplicate. b) At least one dimension is out of bound (`dimPos` is >= 0 and <
+/// rank). c) the number of elements in `dimsPos` is > than `rank`.
+static bool isInvalid(ArrayRef<int64_t> dimsPos, int64_t rank) {
+  // early exit.
+  if (dimsPos.size() > rank)
+    return true;
+  DenseSet<int64_t> uniqued;
+  for (int64_t dim : dimsPos)
+    uniqued.insert(dim);
+  if (dimsPos.size() != uniqued.size())
+    return true;
+  return llvm::any_of(
+      dimsPos, [rank](int64_t dimPos) { return dimPos < 0 || dimPos >= rank; });
+}
+
+/// Returns true if the dimension of `sourceShape` is smaller than the dimension
+/// of the `limitShape`.
+static bool isSmallerThan(ArrayRef<int64_t> sourceShape,
+                          ArrayRef<int64_t> limitShape) {
+  assert(
+      sourceShape.size() == limitShape.size() &&
+      "expected source shape rank, and limit of the shape to have same rank");
+  return llvm::all_of(
+      llvm::zip(sourceShape, limitShape), [](std::tuple<int64_t, int64_t> it) {
+        int64_t sourceExtent = std::get<0>(it);
+        int64_t limit = std::get<1>(it);
+        return sourceExtent == ShapedType::kDynamic ||
+               limit == ShapedType::kDynamic || sourceExtent <= limit;
+      });
 }
 
 //===----------------------------------------------------------------------===//
@@ -131,9 +157,18 @@ LogicalResult ScatterOp::verify() {
         "expected indices to be of rank 2 of i32 element type");
   }
   auto indexDepth = getIndexDepth();
-  if (indexDepth == ShapedType::kDynamicSize) {
+  if (indexDepth == ShapedType::kDynamic) {
     return op->emitOpError("expected index depth is static");
   }
+
+  auto dimMap = dimensionMap();
+  if (dimMap.size() != indexDepth) {
+    return op->emitOpError("invalid number of dimension map entries ");
+  }
+
+  auto originalType = getOriginalType();
+  if (isInvalid(dimMap, originalType.getRank()))
+    return op->emitOpError("dimension map is invalid");
 
   // The first dimension of the indices should match the first dimension of the
   // output. They indicate to the number of updates.
@@ -145,7 +180,6 @@ LogicalResult ScatterOp::verify() {
     return op->emitOpError(
         "mismatch in shape of indices and update value at dim#0");
   }
-  auto originalType = getOriginalType();
   if (updateType.getRank() - 1 > originalType.getRank()) {
     return op->emitOpError(
         "update value rank exceeds the rank of the original value");
@@ -158,7 +192,7 @@ LogicalResult ScatterOp::verify() {
         "index depth and update value does not cover rank of original value");
   }
 
-  // Validate the non-indexed update dims covier the full slice size of the
+  // Validate the non-indexed update dims cover the full slice size of the
   // original tensor.
   int64_t fullSliceDims = originalType.getRank() - indexDepth;
   for (auto it :
@@ -167,10 +201,10 @@ LogicalResult ScatterOp::verify() {
                                      updateType.getRank()))) {
     int64_t originalDim = std::get<0>(it);
     int64_t updateDim = std::get<1>(it);
-    if (updateType.getDimSize(updateDim) !=
+    if (updateType.getDimSize(updateDim) >
         originalType.getDimSize(originalDim)) {
-      return op->emitOpError("mismatch in shape of update value dim#")
-             << updateDim << " and original value at dim#" << originalDim;
+      return op->emitOpError("shape of update value dim#")
+             << updateDim << " exceeds original value at dim#" << originalDim;
     }
   }
 
@@ -295,7 +329,7 @@ ScatterOp::getTiledImplementation(OpBuilder &builder,
     resultTypes.push_back(tiledOriginal.getType());
   }
   Operation *tiledScatterOp =
-      cast<LinalgExtOp>(getOperation())
+      cast<DestinationStyleOpInterface>(getOperation())
           .clone(builder, loc, resultTypes,
                  ValueRange{tiledUpdate, tiledIndices, tiledOriginal});
   return {tiledScatterOp};
@@ -344,14 +378,18 @@ LogicalResult ScatterOp::generateScalarImplementation(OpBuilder &b,
     starts[it.index() + offset] = it.value();
   }
 
+  auto dimMap = dimensionMap();
+
   for (auto i : llvm::seq<unsigned>(0, indexDepth)) {
     loadIndices.back() = b.create<arith::ConstantIndexOp>(loc, i);
     Value idx = b.create<memref::LoadOp>(loc, indices(), loadIndices);
-    Value cast = b.create<arith::IndexCastOp>(loc, b.getIndexType(), idx);
+    Value ret = b.create<arith::IndexCastOp>(loc, b.getIndexType(), idx);
 
-    if (starts[i])
-      cast = b.create<arith::AddIOp>(loc, cast, starts[i]);
-    starts[i] = cast;
+    auto dim = dimMap[i];
+
+    if (starts[dim])
+      ret = b.create<arith::AddIOp>(loc, ret, starts[dim]);
+    starts[dim] = ret;
   }
 
   Value init = b.create<memref::LoadOp>(loc, original(), starts);
@@ -483,7 +521,7 @@ SortOp::getTiledImplementation(OpBuilder &builder,
     resultTypes = llvm::to_vector<4>(
         llvm::map_range(tiledOperands, [&](Value v) { return v.getType(); }));
   }
-  Operation *tiledSortOp = cast<LinalgExtOp>(getOperation())
+  Operation *tiledSortOp = cast<DestinationStyleOpInterface>(getOperation())
                                .clone(builder, loc, resultTypes, tiledOperands);
   return {tiledSortOp};
 }
@@ -590,7 +628,7 @@ LogicalResult FftOp::verify() {
   // After tiling, it could be dynamic shape. (Because
   // subview/subtensor does not inference the type correctly
   // on (1 << x)) cases).
-  if (length == ShapedType::kDynamicSize)
+  if (length == ShapedType::kDynamic)
     return success();
   if (length & (length - 1)) {
     return op->emitOpError("only powers of 2 are handled currently");
@@ -627,7 +665,7 @@ SmallVector<Range> FftOp::getIterationDomain(OpBuilder &builder) {
   Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
   for (auto en : llvm::enumerate(getOperandShape().drop_back())) {
     Value size;
-    if (en.value() == ShapedType::kDynamicSize) {
+    if (en.value() == ShapedType::kDynamic) {
       size = getDimValue(builder, loc, getReal(), en.index());
     } else {
       size = builder.create<arith::ConstantIndexOp>(loc, en.value());
@@ -659,12 +697,8 @@ void FftOp::generateScalarImplWithoutCoeffBuf(OpBuilder &b, Location loc,
       loc, llvm::APFloat(static_cast<float>(-2 * acos(-1))), f32Type);
   coeff = b.create<arith::DivFOp>(loc, coeff, indexToF32(b, loc, wholeSize));
 
-  SmallVector<StringRef> iteratorTypes = llvm::to_vector(
-      llvm::map_range(getLoopIteratorTypes(), [](utils::IteratorType it) {
-        return utils::stringifyIteratorType(it);
-      }));
   b.create<linalg::GenericOp>(
-      loc, TypeRange{}, ValueRange{}, operands, maps, iteratorTypes,
+      loc, TypeRange{}, ValueRange{}, operands, maps, getLoopIteratorTypes(),
       [&](OpBuilder &b, Location loc, ValueRange args) {
         Value lhsReal = args[0];
         Value lhsImag = args[1];
@@ -708,13 +742,10 @@ void FftOp::generateScalarImplWithCoeffBuf(OpBuilder &b, Location loc,
       2, AffineMap::get(rank, 0, b.getAffineDimExpr(rank - 1), b.getContext()));
   maps.append(operands.size(), b.getMultiDimIdentityMap(rank));
 
-  SmallVector<StringRef> iteratorTypes = llvm::to_vector(
-      llvm::map_range(getLoopIteratorTypes(), [](utils::IteratorType it) {
-        return utils::stringifyIteratorType(it);
-      }));
   b.create<linalg::GenericOp>(
       loc, TypeRange{}, ValueRange{getRealCoeff(), getImagCoeff()}, operands,
-      maps, iteratorTypes, [&](OpBuilder &b, Location loc, ValueRange args) {
+      maps, getLoopIteratorTypes(),
+      [&](OpBuilder &b, Location loc, ValueRange args) {
         Value wReal = args[0];
         Value wImag = args[1];
         Value lhsReal = args[2];
@@ -813,7 +844,7 @@ FftOp::getTiledImplementation(OpBuilder &builder,
       resultTypes.push_back(tiledOperands.back().getType());
     }
   }
-  Operation *tiledFftOp = cast<LinalgExtOp>(getOperation())
+  Operation *tiledFftOp = cast<DestinationStyleOpInterface>(getOperation())
                               .clone(builder, loc, resultTypes, tiledOperands);
   return {tiledFftOp};
 }
@@ -871,8 +902,8 @@ LogicalResult ScanOp::verify() {
   }
   if (llvm::any_of(llvm::zip(expectedAccumulatorShape, accumulatorShape),
                    [](std::tuple<int64_t, int64_t> s) {
-                     return std::get<0>(s) != ShapedType::kDynamicSize &&
-                            std::get<1>(s) != ShapedType::kDynamicSize &&
+                     return std::get<0>(s) != ShapedType::kDynamic &&
+                            std::get<1>(s) != ShapedType::kDynamic &&
                             std::get<0>(s) != std::get<1>(s);
                    })) {
     return op->emitOpError("incompatible input/accumulator shapes");
@@ -886,8 +917,8 @@ LogicalResult ScanOp::verify() {
   }
   if (llvm::any_of(llvm::zip(inputShapes, outputShapes),
                    [](std::tuple<int64_t, int64_t> s) {
-                     return std::get<0>(s) != ShapedType::kDynamicSize &&
-                            std::get<1>(s) != ShapedType::kDynamicSize &&
+                     return std::get<0>(s) != ShapedType::kDynamic &&
+                            std::get<1>(s) != ShapedType::kDynamic &&
                             std::get<0>(s) != std::get<1>(s);
                    })) {
     return op->emitOpError("incompatible input/output shapes");
@@ -1028,7 +1059,7 @@ ScanOp::getTiledImplementation(OpBuilder &builder,
     resultTypes.push_back(tiledOperands[2].getType());
   }
 
-  Operation *tiledScanOp = cast<LinalgExtOp>(getOperation())
+  Operation *tiledScanOp = cast<DestinationStyleOpInterface>(getOperation())
                                .clone(builder, loc, resultTypes, tiledOperands);
   return {tiledScanOp};
 }
@@ -1057,21 +1088,9 @@ LogicalResult ScanOp::getResultTilePosition(
   return failure();
 }
 
-static LogicalResult foldMemRefCast(Operation *op) {
-  bool folded = false;
-  for (OpOperand &operand : op->getOpOperands()) {
-    auto castOp = operand.get().getDefiningOp<memref::CastOp>();
-    if (castOp && memref::CastOp::canFoldIntoConsumerOp(castOp)) {
-      operand.set(castOp.getOperand());
-      folded = true;
-    }
-  }
-  return success(folded);
-}
-
 LogicalResult ScanOp::fold(ArrayRef<Attribute>,
                            SmallVectorImpl<OpFoldResult> &) {
-  return foldMemRefCast(*this);
+  return memref::foldMemRefCast(*this);
 }
 
 LogicalResult
@@ -1106,8 +1125,8 @@ LogicalResult ReverseOp::verify() {
   }
   if (llvm::any_of(llvm::zip(inputShapes, outputShapes),
                    [](std::tuple<int64_t, int64_t> s) {
-                     return std::get<0>(s) != ShapedType::kDynamicSize &&
-                            std::get<1>(s) != ShapedType::kDynamicSize &&
+                     return std::get<0>(s) != ShapedType::kDynamic &&
+                            std::get<1>(s) != ShapedType::kDynamic &&
                             std::get<0>(s) != std::get<1>(s);
                    })) {
     return op->emitOpError("incompatible input/output shapes");
@@ -1189,7 +1208,7 @@ ReverseOp::getTiledImplementation(OpBuilder &builder,
         getSlice(builder, loc, output(), mirrorOffsets, sizes, strides));
   }
 
-  Operation *tiledRevOp = cast<LinalgExtOp>(getOperation())
+  Operation *tiledRevOp = cast<DestinationStyleOpInterface>(getOperation())
                               .clone(builder, loc, resultTypes, tiledOperands);
 
   return {tiledRevOp};
@@ -1270,34 +1289,26 @@ LogicalResult TopkOp::verify() {
   // Input indicies and values must have the same shape.
   if (auto inputIndices = indices()) {
     auto inputIndicesType = inputIndices->getType().cast<ShapedType>();
-    if (llvm::any_of(
-            llvm::zip(inputValuesType.getShape(), inputIndicesType.getShape()),
-            [](std::tuple<int64_t, int64_t> s) {
-              return isShapedTypeDimEqual(std::get<0>(s), std::get<1>(s));
-            })) {
+    if (!areShapesCompatible(inputValuesType.getShape(),
+                             inputIndicesType.getShape()))
       return op->emitOpError("input indices/values shape must match");
-    }
   }
   // Output indicies and values must have the same shape.
-  if (llvm::any_of(
-          llvm::zip(outputValuesType.getShape(), outputIndicesType.getShape()),
-          [](std::tuple<int64_t, int64_t> s) {
-            return isShapedTypeDimEqual(std::get<0>(s), std::get<1>(s));
-          })) {
+  if (!areShapesCompatible(outputValuesType.getShape(),
+                           outputIndicesType.getShape()))
     return op->emitOpError("output indices/values shape must match");
-  }
   // Input shape must match the output shape except for the dimension()
   uint64_t dim = getDimension();
-  if (llvm::any_of(llvm::enumerate(llvm::zip(inputValuesType.getShape(),
-                                             outputValuesType.getShape())),
-                   [dim](auto e) {
-                     if (e.index() == dim) {
-                       return false;
-                     }
-                     std::tuple<int64_t, int64_t> s = e.value();
-                     return isShapedTypeDimEqual(std::get<0>(s),
-                                                 std::get<1>(s));
-                   })) {
+  if (!llvm::all_of(llvm::enumerate(llvm::zip(inputValuesType.getShape(),
+                                              outputValuesType.getShape())),
+                    [dim](auto e) {
+                      if (e.index() == dim) {
+                        return true;
+                      }
+                      std::tuple<int64_t, int64_t> s = e.value();
+                      return isShapedTypeDimCompatible(std::get<0>(s),
+                                                       std::get<1>(s));
+                    })) {
     return op->emitOpError("incompatible input/output shapes");
   }
   // Check region compatibility
@@ -1474,7 +1485,7 @@ TopkOp::getTiledImplementation(OpBuilder &builder,
     resultTypes.push_back(tiledOperands[tiledOperands.size() - 1].getType());
   }
 
-  Operation *tiledTopkOp = cast<LinalgExtOp>(getOperation())
+  Operation *tiledTopkOp = cast<DestinationStyleOpInterface>(getOperation())
                                .clone(builder, loc, resultTypes, tiledOperands);
   return {tiledTopkOp};
 }
@@ -1499,100 +1510,27 @@ TopkOp::reifyResultShapes(OpBuilder &b,
 }
 
 //===----------------------------------------------------------------------===//
-// PackOp
+// PackOp and UnPackOp utils
 //===----------------------------------------------------------------------===//
 
-// Return true if each element in `dimsPos` is >= 0 and < rank.
-static bool isInBound(ArrayRef<int64_t> dimsPos, int64_t rank) {
-  return llvm::all_of(
-      dimsPos, [rank](int64_t dimPos) { return dimPos >= 0 && dimPos < rank; });
-}
-
-// Interchange `elements` starting at offset `offset` based on the indexes in
-// `interchangeVector`.
-template <typename T>
-static SmallVector<T> interchange(ArrayRef<T> elements,
-                                  ArrayRef<int64_t> interchangeVector,
-                                  int64_t offset) {
-  SmallVector<T> rearrangedElements = llvm::to_vector(elements);
-  if (interchangeVector.empty())
-    return rearrangedElements;
-  assert((rearrangedElements.size() - offset) == interchangeVector.size() &&
-         "number of elements must equal number of permutations");
-  for (int64_t idx = 0, end = interchangeVector.size(); idx < end; idx++) {
-    rearrangedElements[interchangeVector[idx] + offset] =
-        elements[idx + offset];
-  }
-  return rearrangedElements;
-}
-
-// Infer result/output type given the input and the tile sizes.
-ShapedType PackOp::inferResultType() {
-  DenseMap<int64_t, OpFoldResult> tileAndPosMapping = getDimAndTileMapping();
-  SmallVector<int64_t> inferredShape;
-  inferredShape.reserve(getOutputRank());
-  ShapedType inputType = getInputType();
-  int64_t rank = getInputRank();
-
-  // tile loop.
-  for (auto i : llvm::seq<int64_t>(0, rank)) {
-    if (tileAndPosMapping.count(i)) {
-      Optional<int64_t> tileSize =
-          getConstantIntValue(tileAndPosMapping.lookup(i));
-      if (inputType.isDynamicDim(i) || !tileSize) {
-        inferredShape.push_back(ShapedType::kDynamicSize);
-      } else {
-        int64_t sizeTiledDim = ceilDiv(inputType.getDimSize(i), *tileSize);
-        inferredShape.push_back(sizeTiledDim);
-      }
-    } else {
-      inferredShape.push_back(inputType.getShape()[i]);
-    }
-  }
-
-  // point loop.
-  auto staticTiles = getStaticTiles();
-  inferredShape.append(staticTiles.begin(), staticTiles.end());
-
-  return TypeSwitch<Type, ShapedType>(inputType)
-      .Case<RankedTensorType>([&](RankedTensorType t) -> ShapedType {
-        return RankedTensorType::get(inferredShape, inputType.getElementType());
-      })
-      .Case<MemRefType>([&](MemRefType t) -> ShapedType {
-        return MemRefType::get(inferredShape, inputType.getElementType());
-      })
-      .Default([&](Type t) {
-        llvm_unreachable("unexpected type");
-        return nullptr;
-      });
-}
-
-// Return true if at least one element in `tiles` is zero.
+/// Return true if at least one element in `tiles` is zero.
 static bool hasZeros(ArrayRef<OpFoldResult> tiles) {
   return llvm::any_of(
       tiles, [&](OpFoldResult tile) { return isConstantIntValue(tile, 0); });
 }
 
-// Return true if `dimsPos` is invalid. It is invalid when: a) it contains
-// duplicate.
-static bool isInvalid(ArrayRef<int64_t> dimsPos) {
-  DenseSet<int64_t> uniqued;
-  for (int64_t dim : dimsPos)
-    uniqued.insert(dim);
-  return dimsPos.size() != uniqued.size();
-}
-
-// Check if we have enough static information to catch undefined behavior when
-// the tile size does not divide perfectly the dimension of the input tensor.
-static bool areNotFullTiles(ArrayRef<int64_t> inputShape,
-                            DenseMap<int64_t, OpFoldResult> dimAndTileMapping) {
+/// Check if we have enough static information to catch undefined behavior when
+/// the tile size does not divide perfectly the dimension of the input tensor.
+static bool
+areNotFullTiles(ArrayRef<int64_t> inputShape,
+                DenseMap<int64_t, OpFoldResult> const &dimAndTileMapping) {
   int64_t rank = inputShape.size();
   for (int64_t dim = 0; dim < rank; dim++) {
-    if (inputShape[dim] == ShapedType::kDynamicSize)
+    if (inputShape[dim] == ShapedType::kDynamic)
       continue;
-    if (dimAndTileMapping.count(dim)) {
-      Optional<int64_t> constantTile =
-          getConstantIntValue(dimAndTileMapping[dim]);
+    auto it = dimAndTileMapping.find(dim);
+    if (it != dimAndTileMapping.end()) {
+      Optional<int64_t> constantTile = getConstantIntValue(it->second);
       if (!constantTile)
         continue;
       if (inputShape[dim] % (*constantTile) != 0)
@@ -1602,105 +1540,49 @@ static bool areNotFullTiles(ArrayRef<int64_t> inputShape,
   return false;
 }
 
-// verifier for the pack operation.
-LogicalResult PackOp::verify() {
-  Operation *op = getOperation();
-  size_t numberOfBlockingFactors = getMixedTiles().size();
-  SmallVector<int64_t> dimsPos = extractFromI64ArrayAttr(getDimsPos());
-  // Blocking factors must be less or equal than the input rank, and must
-  // match the number of `dims_pos`.
-  if (numberOfBlockingFactors > getInputRank()) {
-    return op->emitError(
-        "blocking factors must be less or equal than the input rank");
-  }
-  if (numberOfBlockingFactors != dimsPos.size()) {
-    return op->emitError(
-        "blocking factors must equal the number of dimensions to block");
-  }
-  if (isInvalid(dimsPos))
-    return op->emitError("invalid dims_pos vector");
-  // Require `dim_pos` to be in-bound. `dim_pos` carries the index of the
-  // dimensions to block.
-  if (!isInBound(dimsPos, getOutputRank()))
-    return op->emitError("out-of-bound position");
-
-  // Require output rank to match input rank + number of blocking factors.
-  if ((getInputRank() + numberOfBlockingFactors) != getOutputRank()) {
-    return op->emitError(
-        "output rank must equal input rank + blocking factors");
-  }
-
-  // Verify tiles. Make sure each provided tile is non-zero.
-  if (hasZeros(getMixedTiles()))
-    return op->emitError("invalid tile factor");
-
-  // Bail out if the tile does not divide the dimension fully. In the case of
-  // dynamic tile factors or dimensions, having a partial tile is undefined
-  // behavior. We will relax this constraint when we introduce padding
-  // semantics.
-  if (!getPaddingValue() &&
-      areNotFullTiles(getInputShape(), getDimAndTileMapping())) {
-    return op->emitError("invalid tile factor provided. Only full tiles are "
-                         "supported when padding_value is not set");
-  }
-
-  // Verify result type against inferred type.
-  ShapedType expectedType = inferResultType();
-  if (expectedType != getOutputType()) {
-    return op->emitError(
-               "inferred type do not match provied output type. Expected ")
-           << expectedType << " but got: " << getOutputType();
-  }
-
-  if (auto paddingValue = getPaddingValue()) {
-    if (paddingValue.getType() != expectedType.getElementType()) {
-      return op->emitError("expected padding_value has ")
-             << expectedType.getElementType()
-             << " but got: " << paddingValue.getType();
-    }
-  }
-  return success();
-}
-
-// Get the tile sizes as `OpFoldResult`.
-SmallVector<OpFoldResult> PackOp::getMixedTiles() {
+/// Utility function shared between Pack and UnPack to get the tile sizes as
+/// OpFoldResults.
+// TODO: interface or base class in .td
+template <typename OpTy>
+static SmallVector<OpFoldResult> getMixedTiles(OpTy op) {
+  static_assert(llvm::is_one_of<OpTy, PackOp, UnPackOp>::value,
+                "applies to only pack or unpack operations");
   SmallVector<OpFoldResult> mixedInnerTiles;
-  mixedInnerTiles.reserve(getInputRank());
   unsigned dynamicValIndex = 0;
-  for (Attribute attr : getStaticInnerTiles()) {
+  for (Attribute attr : op.getStaticInnerTiles()) {
     auto tileAttr = attr.cast<IntegerAttr>();
     if (!ShapedType::isDynamic(tileAttr.getInt()))
       mixedInnerTiles.push_back(tileAttr);
     else
-      mixedInnerTiles.push_back(getInnerTiles()[dynamicValIndex++]);
+      mixedInnerTiles.push_back(op.getInnerTiles()[dynamicValIndex++]);
   }
   return mixedInnerTiles;
 }
 
-// Return the tile sizes as `int64_t`. If a tile size is dynamic a sentinel
-// `kDynamicSize` is introduced at that position in the returned vector.
-SmallVector<int64_t> PackOp::getStaticTiles() {
+/// Return the tile sizes as `int64_t`. If a tile size is dynamic a sentinel
+/// `kDynamic` is introduced at that position in the returned vector.
+template <typename OpTy>
+static SmallVector<int64_t> getStaticTiles(OpTy op) {
+  static_assert(llvm::is_one_of<OpTy, PackOp, UnPackOp>::value,
+                "applies to only pack or unpack operations");
   SmallVector<Value> dynamicTiles;
   SmallVector<int64_t> staticTiles;
-  dispatchIndexOpFoldResults(getMixedTiles(), dynamicTiles, staticTiles,
-                             ShapedType::kDynamicSize);
+  dispatchIndexOpFoldResults(op.getMixedTiles(), dynamicTiles, staticTiles,
+                             ShapedType::kDynamic);
   return staticTiles;
 }
 
-// Implement the tiling interface. The number of loops equals
-// the rank of the output tensors. All the loops are parallel.
-SmallVector<utils::IteratorType> PackOp::getLoopIteratorTypes() {
-  SmallVector<utils::IteratorType> iteratorTypes(getInputRank(),
-                                                 utils::IteratorType::parallel);
-  return iteratorTypes;
-}
-
-// Return a mapping from positions `dims_pos` to their `OpFoldResult` tile
-// factors.
-DenseMap<int64_t, OpFoldResult> PackOp::getDimAndTileMapping() {
+/// Utility function shared between Pack and UnPack to get a map between
+/// `dim_pos` and `inner_tiles`.
+// TODO: interface or base class in .td
+template <typename OpTy>
+static DenseMap<int64_t, OpFoldResult> getDimAndTileMapping(OpTy op) {
+  static_assert(llvm::is_one_of<OpTy, PackOp, UnPackOp>::value,
+                "applies to only pack or unpack operations");
   DenseMap<int64_t, OpFoldResult> dimAndTileMapping;
-  SmallVector<int64_t> dimsToBlock = extractFromI64ArrayAttr(getDimsPos());
-  SmallVector<OpFoldResult> tiles = getMixedTiles();
+  SmallVector<int64_t> dimsToBlock =
+      extractFromI64ArrayAttr(op.getInnerDimsPos());
+  SmallVector<OpFoldResult> tiles = op.getMixedTiles();
   assert(tiles.size() == dimsToBlock.size() &&
          "tiles must match indices of dimension to block");
   // bind the dimension with the tile factor.
@@ -1709,19 +1591,21 @@ DenseMap<int64_t, OpFoldResult> PackOp::getDimAndTileMapping() {
   return dimAndTileMapping;
 }
 
-// Implements `getIterationDomain` from the tiling interface. In each
-// loop the lower bound is zero and the step is one. For upper bound
-// is inferred from the output tensor for the dimensions that are
-// not part of the data tile created.
-SmallVector<Range> PackOp::getIterationDomain(OpBuilder &builder) {
-  int64_t inputRank = getInputRank();
-  SmallVector<Range> loopBounds(inputRank);
-  Location loc = getLoc();
+/// Utility function to build the iteration domain for `packOp` or `unPackOp`.
+template <typename OpTy>
+static SmallVector<Range> getIterationDomain(OpTy op, OpBuilder &builder) {
+  static_assert(llvm::is_one_of<OpTy, PackOp, UnPackOp>::value,
+                "applies to only pack or unpack operations");
+  OpBuilder::InsertionGuard g(builder);
+  Location loc = op.getLoc();
+  int64_t rank = (std::is_same<OpTy, PackOp>::value) ? op.getInputRank()
+                                                     : op.getOutputRank();
+  SmallVector<Range> loopBounds(rank);
   Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
   Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
   ReifiedRankedShapedTypeDims resultShape;
-  (void)reifyResultShapes(builder, resultShape);
-  for (auto dim : llvm::seq<int64_t>(0, inputRank)) {
+  (void)op.reifyResultShapes(builder, resultShape);
+  for (auto dim : llvm::seq<int64_t>(0, rank)) {
     loopBounds[dim].offset = zero;
     loopBounds[dim].stride = one;
     loopBounds[dim].size = resultShape[0][dim];
@@ -1729,29 +1613,220 @@ SmallVector<Range> PackOp::getIterationDomain(OpBuilder &builder) {
   return loopBounds;
 }
 
-// Return the `interchangeVector` based on `dims_pos`.
-SmallVector<int64_t> computeInterchangeFromDimPos(ArrayRef<int64_t> dimsPos,
-                                                  int64_t inputRank) {
-  SmallVector<int64_t> interchangeVector;
-  interchangeVector.reserve(dimsPos.size());
-  // First map dims and their position. For example, dims_pos = [2, 0] will map
-  // to:
-  // [
-  //  [ key: 2, value: 0]
-  //  [ key: 0, value: 1]
-  // ]
-  // where key is the idx in dims_pos while value its position in dims_pos.
-  DenseMap<int64_t, int64_t> dimsAndPosMapping;
-  for (int64_t dimsIdx = 0, end = dimsPos.size(); dimsIdx < end; dimsIdx++)
-    dimsAndPosMapping[dimsPos[dimsIdx]] = dimsIdx;
-
-  // Scan the position in order and insert the value in the map
-  // to compute the interchange vector.
-  for (int64_t dimsIdx = 0; dimsIdx < inputRank; dimsIdx++) {
-    if (dimsAndPosMapping.count(dimsIdx))
-      interchangeVector.push_back(dimsAndPosMapping[dimsIdx]);
+/// Common verifier for `PackOp` and `UnPackOp`.
+template <typename OpTy>
+static LogicalResult commonVerifierPackAndUnPackOp(OpTy packOrUnPack) {
+  static_assert(llvm::is_one_of<OpTy, PackOp, UnPackOp>::value,
+                "applies to only pack or unpack operations");
+  Operation *op = packOrUnPack.getOperation();
+  ShapedType unpackedType = (std::is_same<OpTy, PackOp>::value)
+                                ? packOrUnPack.getInputType()
+                                : packOrUnPack.getOutputType();
+  int64_t unpackedRank = unpackedType.getRank();
+  SmallVector<int64_t> innerDimsPos =
+      extractFromI64ArrayAttr(packOrUnPack.getInnerDimsPos());
+  SmallVector<int64_t> outerDimPerm =
+      extractFromI64ArrayAttr(packOrUnPack.getOuterDimsPerm());
+  // Verify tiles. Make sure each provided tile is non-zero.
+  SmallVector<OpFoldResult> mixedTiles = packOrUnPack.getMixedTiles();
+  if (hasZeros(mixedTiles))
+    return op->emitError("invalid tile factor");
+  if (isInvalid(innerDimsPos, unpackedRank))
+    return op->emitError("invalid inner_dims_pos vector");
+  if (isInvalid(outerDimPerm, unpackedRank))
+    return op->emitError("invalid outer_dims_perm vector");
+  if (mixedTiles.size() != innerDimsPos.size()) {
+    return op->emitError(
+        "blocking factors must equal the number of dimensions to block");
   }
-  return interchangeVector;
+
+  // Blocking factors must be less or equal than the input rank, and must
+  // match the number of `dims_pos`.
+  if (mixedTiles.size() > unpackedRank) {
+    return op->emitError(
+        "blocking factors must be less or equal than the input rank");
+  }
+
+  ShapedType packedType = (std::is_same<OpTy, PackOp>::value)
+                              ? packOrUnPack.getOutputType()
+                              : packOrUnPack.getInputType();
+  int64_t packedRank = packedType.getRank();
+  // Require output rank to match input rank + number of blocking factors.
+  if (unpackedRank + mixedTiles.size() != packedRank) {
+    return op->emitError(
+        "packed rank must equal unpacked rank + blocking factors");
+  }
+
+  // Verify result shape is greater than the minimum expected
+  // by the pack operation, and that the output shape
+  // represents full tiles.
+  ShapedType expectedPackedType = PackOp::getPackedType(
+      unpackedType, packOrUnPack.getStaticTiles(), innerDimsPos, outerDimPerm);
+  if (!isSmallerThan(expectedPackedType.getShape(), packedType.getShape())) {
+    return op->emitError("the shape of output is not large enough to hold the "
+                         "packed data. Expected at least ")
+           << expectedPackedType << ", got " << packedType;
+  }
+  if (!llvm::all_of(
+          llvm::zip(packedType.getShape().take_back(mixedTiles.size()),
+                    mixedTiles),
+          [](std::tuple<int64_t, OpFoldResult> it) {
+            Optional<int64_t> constTileSize =
+                getConstantIntValue(std::get<1>(it));
+            int64_t shape = std::get<0>(it);
+            if (!constTileSize) {
+              // If specified tile size is dynamic, output shape should
+              // be dynamic too.
+              return shape == ShapedType::kDynamic;
+            } else {
+              if (shape == ShapedType::kDynamic) {
+                // For the shape being dynamic when tile size is
+                // specified, return true. In canonical form a constant
+                // tile size should lead to constant shape of the tiled
+                // dimension, but not needed for verification.
+                return true;
+              }
+              return shape == constTileSize.value();
+            }
+          })) {
+    return op->emitError("mismatch in inner tile sizes specified and shaped of "
+                         "tiled dimension in the packed type");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// PackOp
+//===----------------------------------------------------------------------===//
+
+/// Custom builder methods for pack ops.
+void PackOp::build(OpBuilder &builder, OperationState &state, Value source,
+                   Value output, ArrayRef<int64_t> innerDimsPos,
+                   ArrayRef<OpFoldResult> innerTiles,
+                   Optional<Value> paddingValue,
+                   ArrayRef<int64_t> outerDimsPerm) {
+  assert(innerDimsPos.size() == innerTiles.size() &&
+         "number of tile sizes specified must match the specified number of "
+         "original dimensions to be tiled");
+  SmallVector<int64_t> staticTileSizes;
+  SmallVector<Value> dynamicTileSizes;
+  dispatchIndexOpFoldResults(innerTiles, dynamicTileSizes, staticTileSizes,
+                             ShapedType::kDynamic);
+  build(builder, state, output.getType(), source, output,
+        outerDimsPerm.empty() ? nullptr
+                              : builder.getI64ArrayAttr(outerDimsPerm),
+        builder.getI64ArrayAttr(innerDimsPos), dynamicTileSizes,
+        builder.getI64ArrayAttr(staticTileSizes),
+        (paddingValue ? paddingValue.value() : nullptr));
+}
+
+LogicalResult PackOp::verify() {
+  if (failed(commonVerifierPackAndUnPackOp(*this))) {
+    return failure();
+  }
+
+  // Bail out if the tile does not divide the dimension fully. In the case of
+  // dynamic tile factors or dimensions, having a partial tile is undefined
+  // behavior.
+  auto dimAndTileMapping = getDimAndTileMapping();
+  if (!getPaddingValue() &&
+      areNotFullTiles(getInputShape(), dimAndTileMapping)) {
+    return emitOpError("invalid tile factor provided. Only full tiles are "
+                       "supported when padding_value is not set");
+  }
+
+  if (auto paddingValue = getPaddingValue()) {
+    if (paddingValue.getType() != getInputType().getElementType()) {
+      return emitOpError("expected padding_value has ")
+             << getInputType().getElementType()
+             << " but got: " << paddingValue.getType();
+    }
+  }
+  return success();
+}
+
+SmallVector<OpFoldResult> PackOp::getMixedTiles() {
+  return ::getMixedTiles(*this);
+}
+
+SmallVector<int64_t> PackOp::getStaticTiles() {
+  return ::getStaticTiles(*this);
+}
+
+SmallVector<OpFoldResult> PackOp::getResultShape(
+    OpBuilder &builder, Location loc, ArrayRef<OpFoldResult> sourceDims,
+    ArrayRef<OpFoldResult> innerTileSizes, ArrayRef<int64_t> innerDimsPos,
+    ArrayRef<int64_t> outerDimsPerm) {
+  SmallVector<OpFoldResult> resultDims = llvm::to_vector(sourceDims);
+
+  AffineExpr s0, s1;
+  bindSymbols(builder.getContext(), s0, s1);
+  AffineExpr ceilDivExpr = s0.ceilDiv(s1);
+  for (auto tiledDim : llvm::enumerate(innerDimsPos)) {
+    resultDims[tiledDim.value()] = makeComposedFoldedAffineApply(
+        builder, loc, ceilDivExpr,
+        {resultDims[tiledDim.value()], innerTileSizes[tiledDim.index()]});
+  }
+  if (!outerDimsPerm.empty()) {
+    resultDims =
+        interchange<OpFoldResult>(resultDims, outerDimsPerm, /*offset=*/0);
+  }
+  resultDims.append(innerTileSizes.begin(), innerTileSizes.end());
+  return resultDims;
+}
+
+SmallVector<OpFoldResult> PackOp::getResultShape(OpBuilder &builder) {
+  return tensor::createDimValues(builder, getLoc(), getOutput());
+}
+
+ShapedType PackOp::getPackedType(ShapedType sourceType,
+                                 ArrayRef<int64_t> innerTileSizes,
+                                 ArrayRef<int64_t> innerDimsPos,
+                                 ArrayRef<int64_t> outerDimsPerm) {
+  SmallVector<int64_t> resultShape = llvm::to_vector(sourceType.getShape());
+  for (auto tiledDim : llvm::enumerate(innerDimsPos)) {
+    if (ShapedType::isDynamic(resultShape[tiledDim.value()]))
+      continue;
+    if (ShapedType::isDynamic(innerTileSizes[tiledDim.index()])) {
+      resultShape[tiledDim.value()] = ShapedType::kDynamic;
+      continue;
+    }
+    resultShape[tiledDim.value()] = ceilDiv(resultShape[tiledDim.value()],
+                                            innerTileSizes[tiledDim.index()]);
+  }
+
+  // Swap tile loops if outer_dims_perm is available.
+  resultShape = interchange<int64_t>(resultShape, outerDimsPerm, /*offset=*/0);
+
+  // Append the inner tile dimensions.
+  resultShape.append(innerTileSizes.begin(), innerTileSizes.end());
+  return TypeSwitch<ShapedType, ShapedType>(sourceType)
+      .Case<RankedTensorType>([&](auto shapedType) {
+        return RankedTensorType::get(resultShape, shapedType.getElementType());
+      })
+      .Case<MemRefType>([&](auto shapedType) {
+        return MemRefType::get(resultShape, shapedType.getElementType());
+      })
+      .Default([&](Type t) {
+        assert(false && "unexpected type");
+        return nullptr;
+      });
+}
+
+SmallVector<utils::IteratorType> PackOp::getLoopIteratorTypes() {
+  // Note that here we consider only the tiled loops, the point loops are
+  // materialized when building the body of the operation.
+  SmallVector<utils::IteratorType> iteratorTypes(getInputRank(),
+                                                 utils::IteratorType::parallel);
+  return iteratorTypes;
+}
+
+DenseMap<int64_t, OpFoldResult> PackOp::getDimAndTileMapping() {
+  return ::getDimAndTileMapping(*this);
+}
+
+SmallVector<Range> PackOp::getIterationDomain(OpBuilder &builder) {
+  return ::getIterationDomain(*this, builder);
 }
 
 /// Generate the body of the innermost loop of the scalar implementation
@@ -1766,13 +1841,22 @@ static void generatePackOpScalarImplementationBody(PackOp packOp,
   // the point loop? However, if we interchange `ivs` once more to go to the
   // canonical blocking format: ABCabc, this connection becomes trivial: Each
   // point loop is pointLoopsOffset + inputRank away from the tiled loop.
-  SmallVector<int64_t> dimsToBlock =
-      extractFromI64ArrayAttr(packOp.getDimsPos());
+  SmallVector<int64_t> dimsToInnerBlock =
+      extractFromI64ArrayAttr(packOp.getInnerDimsPos());
+  SmallVector<int64_t> dimsToOuterBlock =
+      extractFromI64ArrayAttr(packOp.getOuterDimsPerm());
+
   SmallVector<Value> interchangedIvs = ivs;
   SmallVector<int64_t> interchangeVector =
-      computeInterchangeFromDimPos(dimsToBlock, packOp.getInputRank());
+      computeInterchangeFromDimPos(dimsToInnerBlock, packOp.getInputRank());
   interchangedIvs = interchange<Value>(interchangedIvs, interchangeVector,
                                        /*offset=*/packOp.getInputRank());
+  if (!dimsToOuterBlock.empty()) {
+    interchangeVector =
+        computeInterchangeFromDimPos(dimsToOuterBlock, packOp.getInputRank());
+    interchangedIvs =
+        interchange<Value>(interchangedIvs, interchangeVector, /*offset=*/0);
+  }
 
   SmallVector<OpFoldResult> tiles = packOp.getMixedTiles();
   DenseMap<int64_t, OpFoldResult> dimAndTileMapping =
@@ -1831,7 +1915,6 @@ static void generatePackOpScalarImplementationBody(PackOp packOp,
   builder.create<memref::StoreOp>(loc, scalar, packOp.getOutput(), ivs);
 }
 
-// Implements `generateScalarImplementation` from the tiling interface.
 LogicalResult PackOp::generateScalarImplementation(OpBuilder &builder,
                                                    Location loc,
                                                    ValueRange ivs) {
@@ -1874,45 +1957,387 @@ LogicalResult PackOp::generateScalarImplementation(OpBuilder &builder,
   return success();
 }
 
+SmallVector<Operation *>
+PackOp::getTiledImplementation(OpBuilder &builder,
+                               ArrayRef<OpFoldResult> offsets,
+                               ArrayRef<OpFoldResult> sizes) {
+  Location loc = getLoc();
+  auto ctx = builder.getContext();
+
+  // Take the minimum of two integers.
+  auto idMap = AffineMap::getMultiDimIdentityMap(2, ctx);
+  auto min = [&](OpFoldResult v1, OpFoldResult v2) -> OpFoldResult {
+    return makeComposedFoldedAffineMin(builder, loc, idMap, {v1, v2});
+  };
+  // Subtract two integers.
+  AffineExpr dim0, dim1;
+  bindDims(ctx, dim0, dim1);
+  auto subMap = AffineMap::get(2, 0, {dim0 - dim1});
+  auto sub = [&](OpFoldResult v1, OpFoldResult v2) -> OpFoldResult {
+    return makeComposedFoldedAffineApply(builder, loc, subMap, {v1, v2});
+  };
+
+  // The tiling is applied on interchanged dimensions. We have to undo the
+  // interchange to map sizes and offsets to the original input.
+  SmallVector<int64_t> dimsToOuterBlock =
+      extractFromI64ArrayAttr(getOuterDimsPerm());
+  SmallVector<OpFoldResult> origOffsets(offsets.begin(), offsets.end());
+  SmallVector<OpFoldResult> origSizes(sizes.begin(), sizes.end());
+  if (!dimsToOuterBlock.empty()) {
+    SmallVector<int64_t> vec =
+        computeInterchangeFromDimPos(dimsToOuterBlock, getInputRank());
+    origOffsets = undoInterchange<OpFoldResult>(origOffsets, vec);
+    origSizes = undoInterchange<OpFoldResult>(origSizes, vec);
+  }
+
+  int64_t inputRank = getInputRank();
+  DenseMap<int64_t, OpFoldResult> dimAndTileMapping = getDimAndTileMapping();
+  SmallVector<OpFoldResult> inputIndices, inputSizes;
+  for (auto dim : llvm::seq<int64_t>(0, inputRank)) {
+    if (dimAndTileMapping.count(dim)) {
+      // If the dimension is tiled, the i-th index is the product of offset_i
+      // and tile_i, and the i-th size is the product of sizes_i and tile_i.
+      AffineExpr i, tile;
+      bindDims(ctx, i);
+      bindSymbols(ctx, tile);
+      OpFoldResult inputIndex = makeComposedFoldedAffineApply(
+          builder, loc, i * tile,
+          ArrayRef<OpFoldResult>{origOffsets[dim], dimAndTileMapping[dim]});
+      inputIndices.push_back(inputIndex);
+
+      OpFoldResult inputSize = makeComposedFoldedAffineApply(
+          builder, loc, i * tile,
+          ArrayRef<OpFoldResult>{origSizes[dim], dimAndTileMapping[dim]});
+      inputSizes.push_back(inputSize);
+    } else {
+      inputIndices.push_back(origOffsets[dim]);
+      inputSizes.push_back(origSizes[dim]);
+    }
+
+    // Limit the size of the input operand for incomplete tiles.
+    OpFoldResult dimSize = getDim(builder, loc, getInput(), dim);
+    inputSizes.back() =
+        min(inputSizes.back(), sub(dimSize, inputIndices.back()));
+  }
+
+  auto oneAttr = builder.getI64IntegerAttr(1);
+  SmallVector<OpFoldResult> strides(inputRank, oneAttr);
+
+  SmallVector<Value> tiledOperands;
+  tiledOperands.push_back(
+      getSlice(builder, loc, getInput(), inputIndices, inputSizes, strides));
+
+  SmallVector<OpFoldResult> outputOffsets, outputSizes;
+  if (failed(getResultTilePosition(builder, 0, offsets, sizes, outputOffsets,
+                                   outputSizes))) {
+    return {};
+  }
+  strides.append(getOutputRank() - inputRank, oneAttr);
+  tiledOperands.push_back(
+      getSlice(builder, loc, getOutput(), outputOffsets, outputSizes, strides));
+
+  for (auto tile : getInnerTiles()) {
+    tiledOperands.push_back(tile);
+  }
+  if (auto val = getPaddingValue()) {
+    tiledOperands.push_back(val);
+  }
+
+  // There are exactly one input and one output, the output is the second
+  // operand.
+  SmallVector<Type, 4> tiledResultTypes;
+  if (hasTensorSemantics()) {
+    tiledResultTypes.push_back(tiledOperands[1].getType());
+  }
+
+  Operation *tiledPackOp =
+      cast<DestinationStyleOpInterface>(getOperation())
+          .clone(builder, loc, tiledResultTypes, tiledOperands);
+
+  return {tiledPackOp};
+}
+
+LogicalResult PackOp::getResultTilePosition(
+    OpBuilder &builder, unsigned resultNumber, ArrayRef<OpFoldResult> offsets,
+    ArrayRef<OpFoldResult> sizes, SmallVector<OpFoldResult> &resultOffsets,
+    SmallVector<OpFoldResult> &resultSizes) {
+  // The tiling is applied on outer dimensions. In this context, the outer
+  // dimensions of result tile position is the same. The inner offsets are
+  // zeros because tiling is not applied to them.
+  auto zeroAttr = builder.getI64IntegerAttr(0);
+  resultOffsets.assign(offsets.begin(), offsets.end());
+  resultOffsets.append(getOutputRank() - getInputRank(), zeroAttr);
+
+  ReifiedRankedShapedTypeDims outputShape;
+  if (failed(reifyResultShapes(builder, outputShape)))
+    return getOperation()->emitOpError("failed to reify result shape");
+  if (outputShape.size() != 1 || outputShape[0].size() != getOutputRank()) {
+    return getOperation()->emitOpError(
+               "expected shape of one result value of rank")
+           << getOutputRank();
+  }
+
+  // The outer sizes are the same because the iteration space is over outer
+  // dimensions. The inner sizes are whole sizes because tiling is not applied
+  // on them.
+  resultSizes.assign(sizes.begin(), sizes.end());
+  for (auto dataTileDim :
+       llvm::seq<unsigned>(getInputRank(), getOutputRank())) {
+    resultSizes.push_back(getAsOpFoldResult(outputShape[0][dataTileDim]));
+  }
+
+  return success();
+}
+
 LogicalResult
 PackOp::reifyResultShapes(OpBuilder &builder,
                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  OpBuilder::InsertionGuard g(builder);
-  builder.setInsertionPoint(getOperation());
-  // Build the output dimension at pos `dimIdx`.
-  auto buildOutputDim = [&](OpBuilder &builder, size_t dimIdx) -> OpFoldResult {
-    ArrayRef<int64_t> outputShape = getOutputShape();
-    if (!ShapedType::isDynamic(outputShape[dimIdx]))
-      return builder.getI64IntegerAttr(outputShape[dimIdx]);
+  return cast<LinalgExtOp>(getOperation())
+      .reifyResultShapes(builder, reifiedReturnShapes);
+}
 
-    // Handle dynamic.
-    DenseMap<int64_t, OpFoldResult> dimAndTileMapping = getDimAndTileMapping();
-    AffineExpr dim = builder.getAffineSymbolExpr(0);
-    AffineExpr tile = builder.getAffineSymbolExpr(1);
-    auto apply = [&](AffineExpr expr,
-                     ArrayRef<OpFoldResult> values) -> OpFoldResult {
-      return makeComposedFoldedAffineApply(builder, getOperation()->getLoc(),
-                                           expr, values);
-    };
-    // If we are dealing with a tiled dimension compose the map otherwise
-    // return the dimension extracted with `memref.dim`.
-    OpFoldResult dimBound =
-        getDim(builder, getOperation()->getLoc(), getOutput(), dimIdx);
-    return (dimAndTileMapping.count(dimIdx))
-               ? apply(dim.ceilDiv(tile),
-                       ArrayRef<OpFoldResult>{dimBound,
-                                              dimAndTileMapping[dimIdx]})
-               : dimBound;
+//===----------------------------------------------------------------------===//
+// UnPackOp
+//===----------------------------------------------------------------------===//
+
+/// Custom builder methods for unpack ops.
+void UnPackOp::build(OpBuilder &builder, OperationState &state, Value source,
+                     Value output, ArrayRef<int64_t> innerDimsPos,
+                     ArrayRef<OpFoldResult> innerTiles,
+                     ArrayRef<int64_t> outerDimsPerm) {
+  SmallVector<int64_t> staticTileSizes;
+  SmallVector<Value> dynamicTileSizes;
+  dispatchIndexOpFoldResults(innerTiles, dynamicTileSizes, staticTileSizes,
+                             ShapedType::kDynamic);
+  build(builder, state, output.getType(), source, output,
+        outerDimsPerm.empty() ? nullptr
+                              : builder.getI64ArrayAttr(outerDimsPerm),
+        builder.getI64ArrayAttr(innerDimsPos), dynamicTileSizes,
+        builder.getI64ArrayAttr(staticTileSizes));
+}
+
+SmallVector<OpFoldResult> UnPackOp::getMixedTiles() {
+  return ::getMixedTiles(*this);
+}
+
+SmallVector<int64_t> UnPackOp::getStaticTiles() {
+  return ::getStaticTiles(*this);
+}
+
+DenseMap<int64_t, OpFoldResult> UnPackOp::getDimAndTileMapping() {
+  return ::getDimAndTileMapping(*this);
+}
+
+LogicalResult UnPackOp::generateScalarImplementation(OpBuilder &builder,
+                                                     Location loc,
+                                                     ValueRange ivs) {
+  assert(ivs.size() == getOutputRank() &&
+         "number of ivs must match the rank of the output tensor");
+  OpBuilder::InsertionGuard g(builder);
+  ReifiedRankedShapedTypeDims outputShape;
+  if (failed(reifyResultShapes(builder, outputShape)))
+    return getOperation()->emitOpError("failed to reify result shape");
+  if (outputShape.size() != 1 || outputShape[0].size() != getOutputRank()) {
+    return getOperation()->emitOpError(
+               "expected shape of one result value of rank")
+           << getOutputRank();
+  }
+
+  DenseMap<int64_t, OpFoldResult> dimAndTileMapping = getDimAndTileMapping();
+  // untiled loops and tile loops induction variables.
+  SmallVector<Value> inputIvs;
+  // point loops induction variables.
+  SmallVector<Value> inputIvsPointLoops;
+  inputIvs.reserve(getOutputRank());
+  inputIvsPointLoops.reserve(dimAndTileMapping.size());
+  for (auto dim : llvm::seq<int64_t>(0, getOutputRank())) {
+    if (dimAndTileMapping.count(dim)) {
+      DivModValue divMod = getDivMod(builder, loc, ivs[dim],
+                                     getValueOrCreateConstantIndexOp(
+                                         builder, loc, dimAndTileMapping[dim]));
+      inputIvsPointLoops.push_back(divMod.remainder);
+      inputIvs.push_back(divMod.quotient);
+    } else {
+      inputIvs.push_back(ivs[dim]);
+    }
+  }
+
+  // TODO: (lorenzo) simplify the logic a bit. There is `ivs`,
+  // `inputIvsPointLoops` and `inputIvs`.
+  assert(inputIvsPointLoops.size() + inputIvs.size() == getInputRank() &&
+         "expect same number of iduction variables equals to input rank");
+  // interchange the point loops induction variables based on `inner_dim_pos`.
+  SmallVector<int64_t> innerDims = extractFromI64ArrayAttr(getInnerDimsPos());
+  SmallVector<int64_t> interchangeVector =
+      computeInterchangeFromDimPos(innerDims, getOutputRank());
+  SmallVector<Value> interchangedInputIvsPointLoops = inputIvsPointLoops;
+  interchangedInputIvsPointLoops = interchange<Value>(
+      interchangedInputIvsPointLoops, interchangeVector, /*offset=*/0);
+  // interchange the tiled loops induction variables based on `outer_dims_perm`.
+  SmallVector<int64_t> outerDims = extractFromI64ArrayAttr(getOuterDimsPerm());
+  if (!outerDims.empty()) {
+    inputIvs = interchange<Value>(inputIvs, outerDims, /*offset=*/0);
+  }
+
+  llvm::append_range(inputIvs, interchangedInputIvsPointLoops);
+  Value scalar = builder.create<memref::LoadOp>(loc, getInput(), inputIvs);
+  builder.create<memref::StoreOp>(loc, scalar, getOutput(), ivs);
+  return success();
+}
+
+LogicalResult
+UnPackOp::reifyResultShapes(OpBuilder &builder,
+                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return cast<LinalgExtOp>(getOperation())
+      .reifyResultShapes(builder, reifiedReturnShapes);
+}
+
+SmallVector<Range> UnPackOp::getIterationDomain(OpBuilder &builder) {
+  return ::getIterationDomain(*this, builder);
+}
+
+SmallVector<Operation *>
+UnPackOp::getTiledImplementation(OpBuilder &builder,
+                                 ArrayRef<OpFoldResult> offsets,
+                                 ArrayRef<OpFoldResult> sizes) {
+  // TODO(hanchung): Extend it to handle memref version.
+  // Tiling on buffers needs extra buffer because tiled unpack op could produce
+  // more data for incomplete tiles. Tiling on tensors satisfies IREE's needs.
+  if (!hasTensorSemantics())
+    return {};
+
+  Location loc = getLoc();
+  auto ctx = builder.getContext();
+
+  AffineExpr dim0, dim1;
+  bindDims(ctx, dim0, dim1);
+  auto addMap = AffineMap::get(2, 0, {dim0 + dim1});
+  auto add = [&](OpFoldResult v1, OpFoldResult v2) -> OpFoldResult {
+    return makeComposedFoldedAffineApply(builder, loc, addMap, {v1, v2});
+  };
+  auto subMap = AffineMap::get(2, 0, {dim0 - dim1});
+  auto sub = [&](OpFoldResult v1, OpFoldResult v2) -> OpFoldResult {
+    return makeComposedFoldedAffineApply(builder, loc, subMap, {v1, v2});
   };
 
-  reifiedReturnShapes.resize(1);
-  reifiedReturnShapes[0].reserve(getOutputRank());
-  for (auto dimIdx : llvm::seq<int64_t>(0, getOutputRank())) {
-    reifiedReturnShapes[0].push_back(getAsValues(
-        builder, getOperation()->getLoc(),
-        ArrayRef<OpFoldResult>{buildOutputDim(builder, dimIdx)})[0]);
+  int64_t inputRank = getInputRank();
+  int64_t outputRank = getOutputRank();
+  Attribute zeroAttr = builder.getIndexAttr(0);
+  Attribute oneAttr = builder.getIndexAttr(1);
+  DenseMap<int64_t, OpFoldResult> dimAndTileMapping = getDimAndTileMapping();
+  SmallVector<OpFoldResult> inputIndices, inputSizes, outputNewOffsets,
+      outputExpandedSizes;
+  for (auto dim : llvm::seq<int64_t>(0, outputRank)) {
+    if (dimAndTileMapping.count(dim)) {
+      DivModValue firstCoord =
+          getDivMod(builder, loc,
+                    getValueOrCreateConstantIndexOp(builder, loc, offsets[dim]),
+                    getValueOrCreateConstantIndexOp(builder, loc,
+                                                    dimAndTileMapping[dim]));
+      DivModValue lastCoord = getDivMod(
+          builder, loc,
+          getValueOrCreateConstantIndexOp(
+              builder, loc, sub(add(offsets[dim], sizes[dim]), oneAttr)),
+          getValueOrCreateConstantIndexOp(builder, loc,
+                                          dimAndTileMapping[dim]));
+
+      inputIndices.push_back(firstCoord.quotient);
+
+      // Get the upper bound because it could be an extract_slice case. The
+      // sizes are determined by loop bound and step, where loop bound is the
+      // size of output shape.
+      // In incomplete tile cases, the input could have larger shape, it is safe
+      // to extend the boundary because they are pre-padded. I.e., the size of
+      // input dim is always aligned to inner_tile_size.
+      FailureOr<int64_t> cstSize = linalg::getConstantUpperBoundForIndex(
+          getValueOrCreateConstantIndexOp(builder, loc, sizes[dim]));
+      Optional<int64_t> cstInnerSize =
+          getConstantIntValue(dimAndTileMapping[dim]);
+      if (!failed(cstSize) && cstInnerSize &&
+          cstSize.value() % cstInnerSize.value() == 0) {
+        inputSizes.push_back(
+            builder.getIndexAttr(cstSize.value() / cstInnerSize.value()));
+      } else {
+        inputSizes.push_back(
+            add(sub(lastCoord.quotient, firstCoord.quotient), oneAttr));
+      }
+      outputNewOffsets.push_back(firstCoord.remainder);
+
+      AffineExpr i, tile;
+      bindDims(builder.getContext(), i);
+      bindSymbols(builder.getContext(), tile);
+      OpFoldResult size = makeComposedFoldedAffineApply(
+          builder, loc, i * tile,
+          ArrayRef<OpFoldResult>{inputSizes.back(), dimAndTileMapping[dim]});
+      outputExpandedSizes.push_back(size);
+    } else {
+      inputIndices.push_back(offsets[dim]);
+      inputSizes.push_back(sizes[dim]);
+      outputNewOffsets.push_back(zeroAttr);
+      outputExpandedSizes.push_back(sizes[dim]);
+    }
+  }
+
+  // The tiling is applied on output dimensions. We have to apply the
+  // interchange on input dimensions if outer_dims_perm is set.
+  SmallVector<int64_t> dimsToOuterBlock =
+      extractFromI64ArrayAttr(getOuterDimsPerm());
+  if (!dimsToOuterBlock.empty()) {
+    SmallVector<int64_t> vec =
+        computeInterchangeFromDimPos(dimsToOuterBlock, getInputRank());
+    inputIndices = interchange<OpFoldResult>(inputIndices, vec);
+    inputSizes = interchange<OpFoldResult>(inputSizes, vec);
+  }
+
+  inputIndices.append(inputRank - outputRank, zeroAttr);
+  auto mixedTiles = getMixedTiles();
+  inputSizes.append(mixedTiles.begin(), mixedTiles.end());
+  SmallVector<OpFoldResult> inputStrides(inputRank, oneAttr);
+
+  SmallVector<Value> tiledOperands;
+  tiledOperands.push_back(getSlice(builder, loc, getInput(), inputIndices,
+                                   inputSizes, inputStrides));
+
+  // The tiling is only avaiable on tensors. It's fine to create a tensor.empty
+  // instead of tensor.pad because the op is not a destination-style op.
+  auto empty = builder.create<tensor::EmptyOp>(
+      loc, outputExpandedSizes, getOutputType().getElementType());
+  tiledOperands.push_back(empty.getResult());
+
+  SmallVector<Type, 4> tiledResultTypes;
+  tiledResultTypes.push_back(tiledOperands[1].getType());
+
+  Operation *tiledUnpackOp =
+      cast<DestinationStyleOpInterface>(getOperation())
+          .clone(builder, loc, tiledResultTypes, tiledOperands);
+
+  SmallVector<OpFoldResult> outputStrides(outputRank, oneAttr);
+  Operation *extractSlice = builder.create<tensor::ExtractSliceOp>(
+      loc, tiledUnpackOp->getResult(0), outputNewOffsets, sizes, outputStrides);
+
+  return {tiledUnpackOp, extractSlice};
+}
+
+LogicalResult UnPackOp::getResultTilePosition(
+    OpBuilder &builder, unsigned resultNumber, ArrayRef<OpFoldResult> offsets,
+    ArrayRef<OpFoldResult> sizes, SmallVector<OpFoldResult> &resultOffsets,
+    SmallVector<OpFoldResult> &resultSizes) {
+  resultOffsets = llvm::to_vector(offsets);
+  resultSizes = llvm::to_vector(sizes);
+  return success();
+}
+
+LogicalResult UnPackOp::verify() {
+  if (failed(commonVerifierPackAndUnPackOp(*this))) {
+    return failure();
   }
   return success();
+}
+
+SmallVector<utils::IteratorType> UnPackOp::getLoopIteratorTypes() {
+  SmallVector<utils::IteratorType> iteratorTypes(getOutputRank(),
+                                                 utils::IteratorType::parallel);
+  return iteratorTypes;
 }
 
 #define DEFINE_OP_GET_EFFECTS(OP_NAME)                                         \
@@ -1932,6 +2357,90 @@ DEFINE_OP_GET_EFFECTS(ReverseOp)
 DEFINE_OP_GET_EFFECTS(ScanOp)
 DEFINE_OP_GET_EFFECTS(TopkOp)
 DEFINE_OP_GET_EFFECTS(PackOp)
+DEFINE_OP_GET_EFFECTS(UnPackOp)
+
+//===----------------------------------------------------------------------===//
+// iree_linalg_ext.set_encoding
+//===----------------------------------------------------------------------===//
+
+void SetEncodingOp::build(OpBuilder &builder, OperationState &state,
+                          Value source, TensorEncoding encoding) {
+  auto encodingAttr = EncodingAttr::get(builder.getContext(), encoding);
+  auto sourceType = source.getType().cast<RankedTensorType>();
+  RankedTensorType encodingType = RankedTensorType::get(
+      sourceType.getShape(), sourceType.getElementType(), encodingAttr);
+  build(builder, state, encodingType, source);
+}
+
+LogicalResult SetEncodingOp::verify() {
+  // Source and the result have the same rank.
+  if (getSourceType().getEncoding()) {
+    return emitOpError(
+        "source of set_encoding op cannot have a tensor encoding");
+  }
+  if (!getResultType().getEncoding().isa_and_nonnull<EncodingAttr>()) {
+    return emitOpError(
+        "result of set_encoding op expected to have a valid tensor encoding");
+  }
+  // The source and result must have the same rank.
+  if (getResultType().getRank() != getSourceType().getRank())
+    return emitOpError("cannot change the rank of the tensor");
+  if (!areShapesCompatible(getResultType().getShape(),
+                           getSourceType().getShape()))
+    return emitOpError("expected to preserve the logical shape of the tensor");
+  return success();
+}
+
+LogicalResult SetEncodingOp::reifyResultShapes(
+    OpBuilder &builder, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  OpBuilder::InsertionGuard g(builder);
+  builder.setInsertionPoint(getOperation());
+  reifiedReturnShapes.resize(1);
+  reifiedReturnShapes[0] = getValueOrCreateConstantIndexOp(
+      builder, getLoc(), getDims(builder, getLoc(), getSource()));
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// iree_linalg_ext.unset_encoding
+//===----------------------------------------------------------------------===//
+
+void UnsetEncodingOp::build(OpBuilder &builder, OperationState &state,
+                            Value source) {
+  auto sourceType = source.getType().cast<RankedTensorType>();
+  auto resultType =
+      RankedTensorType::get(sourceType.getShape(), sourceType.getElementType());
+  return build(builder, state, resultType, source);
+}
+
+LogicalResult UnsetEncodingOp::verify() {
+  if (getResultType().getEncoding()) {
+    return emitOpError(
+        "result of unset_encoding op cannot have a tensor encoding");
+  }
+  if (!getSourceType().getEncoding().isa_and_nonnull<EncodingAttr>()) {
+    return emitOpError(
+        "source of unset_encoding op expected to have a valid tensor encoding");
+  }
+  // The source and result must have the same rank.
+  if (getResultType().getRank() != getSourceType().getRank())
+    return emitOpError("cannot change the rank of the tensor");
+  if (!areShapesCompatible(getResultType().getShape(),
+                           getSourceType().getShape()))
+    return emitOpError("expected to preserve the logical shape of the tensor");
+  return success();
+}
+
+LogicalResult UnsetEncodingOp::reifyResultShapes(
+    OpBuilder &builder, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  OpBuilder::InsertionGuard g(builder);
+  builder.setInsertionPoint(getOperation());
+  reifiedReturnShapes.resize(1);
+  reifiedReturnShapes[0] = getValueOrCreateConstantIndexOp(
+      builder, getLoc(), getDims(builder, getLoc(), getSource()));
+  return success();
+}
+
 namespace {
 /// This is derived from mlir/lib/Dialect/Linalg/IR/LinalgOps.cpp without any
 /// changes.
@@ -1970,9 +2479,17 @@ struct FoldTensorCastOp : public OpInterfaceRewritePattern<LinalgExtOp> {
                                  : opOperand->get());
       newResultTypes.push_back(newOperands.back().getType());
     }
+    // Add the other operands.
+    for (OpOperand *opOperand : op.getNonInputOrOutputOperands()) {
+      auto tensorCastOp = opOperand->get().getDefiningOp<tensor::CastOp>();
+      newOperands.push_back(canFoldIntoConsumerOp(tensorCastOp)
+                                ? tensorCastOp.getSource()
+                                : opOperand->get());
+    }
     // Clone op.
     Operation *newOp =
-        op.clone(rewriter, op->getLoc(), newResultTypes, newOperands);
+        cast<DestinationStyleOpInterface>(op.getOperation())
+            .clone(rewriter, op->getLoc(), newResultTypes, newOperands);
     SmallVector<Value, 4> replacements;
     replacements.reserve(newOp->getNumResults());
     for (auto result : llvm::zip(op->getResults(), newOp->getResults())) {
@@ -2001,5 +2518,7 @@ void IREELinalgExtDialect::getCanonicalizationPatterns(
   results.add<FoldTensorCastOp>(getContext());
 }
 
+// clang-format off
 #define GET_OP_CLASSES
-#include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtOps.cpp.inc"
+#include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtOps.cpp.inc" // IWYU pragma: keep
+// clang-format: on

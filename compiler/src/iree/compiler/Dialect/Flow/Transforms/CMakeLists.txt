@@ -32,6 +32,7 @@ iree_cc_library(
     "CaptureDispatchDynamicDims.cpp"
     "CleanupNumericNarrowing.cpp"
     "CleanupTensorShapes.cpp"
+    "CollapseReductionDims.cpp"
     "Convert1X1FilterConv2DToMatmul.cpp"
     "ConvertConv2DToImg2Col.cpp"
     "ConvertLinalgMatmulToMmt4D.cpp"
@@ -40,7 +41,6 @@ iree_cc_library(
     "DeduplicateExecutables.cpp"
     "DetachElementwiseFromNamedOps.cpp"
     "DispatchLinalgOnTensors.cpp"
-    "DispatchLinalgOnTensorsViaRegionOps.cpp"
     "DispatchWithTransformDialect.cpp"
     "DumpDispatchGraph.cpp"
     "ExpandTensorShapes.cpp"
@@ -57,6 +57,7 @@ iree_cc_library(
     "PassDetail.h"
     "Passes.cpp"
     "RegionOpUtils.cpp"
+    "SetEncoding.cpp"
     "SplitReduction.cpp"
     "StripAndSplatConstantVariables.cpp"
     "StripSignedness.cpp"
@@ -67,6 +68,8 @@ iree_cc_library(
     IREELinalgExtDialect
     IREELinalgExtPasses
     IREELinalgExtTransformOps
+    IREELinalgExtTransforms
+    IREELinalgExtUtils
     IREELinalgTransformDialect
     IREELinalgTransformDialectPasses
 

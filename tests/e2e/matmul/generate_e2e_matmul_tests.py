@@ -25,6 +25,7 @@ class MatrixElemTypeId(enum.Enum):
   I8 = "i8"
   I32 = "i32"
   F32 = "f32"
+  F16 = "f16"
 
 
 # Enumerates of the collections of shapes that we can generate tests for.
@@ -388,9 +389,13 @@ def generate_function(
   func_definition = ""
   compilation_info_attr = ""
   if compilation_info:
-    dispatch_lowering_pass_pipeline = compilation_info.dispatch_lowering_pass_pipeline
-    if "SPIRV" in compilation_info.dispatch_lowering_pass_pipeline:
-      dispatch_lowering_pass_pipeline = "SPIRVVectorize"
+    if "SPIRV" in compilation_info.dispatch_lowering_pass_pipeline == "SPIRVVectorizeMali":
+      dispatch_lowering_pass_pipeline = "SPIRVBaseVectorize"
+    elif compilation_info.dispatch_lowering_pass_pipeline == "SPIRVVectorizeNVIDIA":
+      # TODO: change to test SPIRVMatmulPromoteVectorize too
+      dispatch_lowering_pass_pipeline = "SPIRVBaseVectorize"
+    else:
+      dispatch_lowering_pass_pipeline = compilation_info.dispatch_lowering_pass_pipeline
     compilation_info_string = (
         f"#compilation{generate_function.compilation_index} = #iree_codegen.compilation_info<\n"
         f"  lowering_config = <tile_sizes = {compilation_info.tile_sizes}>,\n"
@@ -509,7 +514,7 @@ def parse_arguments():
                       required=True)
   parser.add_argument("--lhs_rhs_type",
                       type=str,
-                      choices=["i8", "f32"],
+                      choices=["i8", "f32", "f16"],
                       help="Numeric type of input matrices",
                       required=True)
   parser.add_argument("--shapes",

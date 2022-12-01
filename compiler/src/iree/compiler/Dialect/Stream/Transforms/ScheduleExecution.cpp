@@ -13,7 +13,6 @@
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
-#include "iree/compiler/Utils/GraphUtils.h"
 #include "llvm/ADT/EquivalenceClasses.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -28,6 +27,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "mlir/Transforms/TopologicalSortUtils.h"
 
 #define DEBUG_TYPE "iree-stream-schedule-execution"
 
@@ -104,6 +104,9 @@ struct ExecutePartitionBuilder {
     executeOp = parentBuilder.create<IREE::Stream::AsyncExecuteOp>(
         fusedLoc, resultTypes, resultSizes, /*awaitTimepoint=*/Value{},
         operands, operandSizes, tiedOperands);
+    if (partition->affinity) {
+      executeOp.setAffinityAttr(partition->affinity);
+    }
 
     // Add entry block and arguments.
     auto &entryBlock = executeOp.getBody().emplaceBlock();
@@ -137,6 +140,16 @@ struct ExecutePartitionBuilder {
       llvm::dbgs() << "Cloned op into partition " << ordinal << ": ";
       clonedOp->dump();
     });
+
+    // If the op has the same affinity as the partition region we can strip it.
+    // Note that some ops may have affinities that are more specific and we
+    // want to preserve those as long as possible.
+    if (auto affinityOp =
+            dyn_cast<IREE::Stream::AffinityOpInterface>(clonedOp)) {
+      if (affinityOp.getAffinity() == partition->affinity) {
+        affinityOp.setAffinity(nullptr);
+      }
+    }
 
     return true;
   }
@@ -289,7 +302,7 @@ class ScheduleExecutionPass
 
         // Sort the ops in the execution region. This is safe because we are
         // still unaliased and SSA values imply ordering.
-        sortBlockTopologically(block);
+        mlir::sortTopologically(block);
       }
       for (auto *deadOp : llvm::reverse(deadOps)) {
         deadOp->erase();

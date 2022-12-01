@@ -40,6 +40,7 @@ iree_cc_library(
     TPPStandalone
     
     IREEDialectsTransforms
+    IREELinalgExtDialect
     IREELinalgTransformDialect
 
     LLVMSupport
@@ -48,13 +49,17 @@ iree_cc_library(
     MLIRArithUtils
     MLIRBufferizationDialect
     MLIRBufferizationTransforms
+    MLIRGPUOps
     MLIRLinalgTransformOps
     MLIRLinalgTransforms
     MLIRMemRefDialect
     MLIRMemRefTransforms
+    MLIRPDLDialect
     MLIRPass
+    MLIRSCFDialect
     MLIRTensorDialect
     MLIRTransformDialect
+    MLIRTransforms
     iree::compiler::Codegen::Common::CommonPasses
     iree::compiler::Codegen::Interfaces::BufferizationInterfaces
     iree::compiler::Codegen::PassHeaders

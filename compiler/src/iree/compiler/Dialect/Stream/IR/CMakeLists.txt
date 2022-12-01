@@ -50,6 +50,7 @@ iree_cc_library(
     MLIRSupport
     MLIRTensorDialect
     MLIRTransformUtils
+    MLIRViewLikeInterface
     iree::compiler::Dialect::Stream::Builtins
     iree::compiler::Dialect::Util::IR
     iree::compiler::Utils
@@ -72,6 +73,8 @@ iree_tablegen_library(
   TD_FILE
     "StreamInterfaces.td"
   OUTS
+    --gen-attr-interface-decls StreamAttrInterfaces.h.inc
+    --gen-attr-interface-defs StreamAttrInterfaces.cpp.inc
     --gen-op-interface-decls StreamOpInterfaces.h.inc
     --gen-op-interface-defs StreamOpInterfaces.cpp.inc
     --gen-type-interface-decls StreamTypeInterfaces.h.inc

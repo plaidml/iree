@@ -74,7 +74,8 @@ static Optional<Type> getLegalizedType(Type t) {
     Optional<Type> legalizedElementType = getLegalizedElementType(elementType);
     if (!legalizedElementType) return llvm::None;
     return RankedTensorType::get(shapedType.getShape(),
-                                 legalizedElementType.value());
+                                 legalizedElementType.value(),
+                                 shapedType.getEncoding());
   }
   return llvm::None;
 }
@@ -163,7 +164,7 @@ struct GenericOpTypePropagation
         modifiedOperandIndex.insert(operand.index());
       }
       // If the operand is an `outs` tensor, its type needs to be changed.
-      if (genericOp.isOutputTensor(&operand.value())) {
+      if (genericOp.isDpsInit(&operand.value())) {
         resultTypes.push_back(legalizedType);
       }
     }
@@ -240,7 +241,7 @@ struct GenericOpTypePropagation
       for (auto modifiedOperandIndex : modifiedOperandIndex) {
         OpOperand *modifiedOpOperand =
             &modifiedOp->getOpOperand(modifiedOperandIndex);
-        if (modifiedOp.isOutputTensor(modifiedOpOperand)) {
+        if (modifiedOp.isDpsInit(modifiedOpOperand)) {
           modifyYield = true;
           OpOperand *yieldOperand =
               modifiedOp.getMatchingYieldValue(modifiedOpOperand);

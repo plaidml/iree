@@ -79,7 +79,7 @@ ConstExprOpInfo ConstExprOpInfo::getForOp(Operation *op) {
     // Notably: IndexOp is not included because it establishes a hidden
     // dependency to the iterator and is non-const.
     if (llvm::isa<linalg::LinalgOp>(op) || llvm::isa<tensor::PadOp>(op) ||
-        llvm::isa<linalg::InitTensorOp>(op)) {
+        llvm::isa<tensor::EmptyOp>(op)) {
       return getInfoForDefaultConstExprOp(op);
     }
 
@@ -87,7 +87,7 @@ ConstExprOpInfo ConstExprOpInfo::getForOp(Operation *op) {
   }
 
   // By default any effects make it non const-expr.
-  if (!MemoryEffectOpInterface::hasNoEffect(op)) {
+  if (!isMemoryEffectFree(op)) {
     return {};
   }
 
@@ -128,7 +128,7 @@ bool isHoistableConstExprLeaf(const ConstExprAnalysis::ConstValueInfo *info) {
     // op cheaper.
     if (genericOp.getNumParallelLoops() == genericOp.getNumLoops() &&
         isa<linalg::YieldOp>(genericOp.getBody()->front())) {
-      for (OpOperand *opOperand : genericOp.getInputOperands()) {
+      for (OpOperand *opOperand : genericOp.getDpsInputOperands()) {
         AffineMap indexingMap = genericOp.getMatchingIndexingMap(opOperand);
         if (indexingMap.isProjectedPermutation() &&
             indexingMap.getNumDims() != indexingMap.getNumResults()) {
@@ -140,7 +140,7 @@ bool isHoistableConstExprLeaf(const ConstExprAnalysis::ConstValueInfo *info) {
 
   // Never hoist init_tensor. These are sometimes used for pure shape metadata
   // and must not be separated from their consumers.
-  if (isa<linalg::InitTensorOp>(op)) {
+  if (isa<tensor::EmptyOp>(op)) {
     return false;
   }
 
@@ -151,7 +151,7 @@ bool isHoistableConstExprConsumingOperand(OpOperand *operand) {
   Operation *op = operand->getOwner();
   // For linalg ops, we only want to hoist inputs.
   if (auto structuredOp = dyn_cast<linalg::LinalgOp>(op)) {
-    return operand->getOperandNumber() < structuredOp.getNumInputs();
+    return operand->getOperandNumber() < structuredOp.getNumDpsInputs();
   }
 
   // Fallback to yes.

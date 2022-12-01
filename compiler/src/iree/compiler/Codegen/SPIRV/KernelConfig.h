@@ -24,7 +24,20 @@
 namespace mlir {
 namespace iree_compiler {
 
+/// By default don't do any pipelining.
+constexpr unsigned defaultSoftwarePipelineDepth = 1;
+
+/// Computes the total number of bytes if promoting both matmul LHS and RHS with
+/// the tiven tile sizes.
+int64_t getTileBytes(int64_t mTileSize, int64_t nTileSize, int64_t kTileSize,
+                     int64_t elementBits);
+
+/// Adjusts the shared memory usage based on the pipelining depth.
+int64_t getMultiBufferMemoryUsage(int64_t singleBufferBytes, unsigned depth);
+
 namespace detail {
+
+const int bankConflictReductionPaddingBits = 128;
 
 /// Sets CodeGen configurations via attributes to the given convolution
 /// `linalgOp` by trying to achieve the given `bestTilingFactor`, which is how
@@ -35,10 +48,17 @@ LogicalResult setConvOpConfig(linalg::LinalgOp linalgOp,
 
 /// Sets CodeGen configurations via attributes to the given matmul `linalgOp`
 /// with the given best workgroup size and tile size hints.
-LogicalResult setMatmulOpConfig(linalg::LinalgOp linalgOp, int64_t subgroupSize,
-                                std::array<int64_t, 2> bestWorkgroupSizeXY,
-                                std::array<int64_t, 3> bestThreadTileSizeMNK,
-                                bool useWorkgroupMemory = false);
+LogicalResult setMatmulOpConfig(
+    spirv::ResourceLimitsAttr limits, linalg::LinalgOp linalgOp,
+    std::array<int64_t, 2> bestWorkgroupSizeXY,
+    std::array<int64_t, 3> bestThreadTileSizeMNK, bool enablePromotion = false,
+    unsigned softwarePipelineDepth = defaultSoftwarePipelineDepth);
+
+/// Sets CodeGen configurations via attributes to the given matmul `linalgOp`
+/// with tile sizes for cooperative matrix, if possible for the given matmul
+/// size.
+LogicalResult setCooperativeMatrixConfig(const spirv::TargetEnv &targetEnv,
+                                         linalg::LinalgOp op);
 
 /// Sets CodeGen configuration for GPUs from a specific vendor.
 ///
@@ -65,6 +85,12 @@ LogicalResult setNVIDIACodeGenConfig(const spirv::TargetEnv &targetEnv,
 
 /// Returns true if the given `linalgOp` is a (batch) matmul op.
 bool isMatmulOrBatchMatmul(linalg::LinalgOp linalgOp);
+
+/// Given the linalg `op` with `lhsShape` and `rhsShape`, tries to treat as a
+/// (batch) matmul like op and deduce the index of the loop corresponding to
+/// B/M/N/K dimension respectively. Returns -1 as the index if unable to deduce.
+std::tuple<int, int, int, int> getMatmulBMNKIndex(
+    linalg::LinalgOp op, int *lastParallelDim = nullptr);
 
 /// Attaches the `translation_info` attribute to entry points in `moduleOp` and
 /// `lowering_config` attributes to all root ops in `moduleOp`'s region.

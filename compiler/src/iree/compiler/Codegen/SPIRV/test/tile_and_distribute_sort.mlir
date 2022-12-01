@@ -1,7 +1,7 @@
-// RUN: iree-opt --split-input-file --pass-pipeline='hal.executable(hal.executable.variant(builtin.module(func.func(iree-spirv-tile-and-distribute, cse))))' %s | FileCheck %s
+// RUN: iree-opt --split-input-file --pass-pipeline='builtin.module(hal.executable(hal.executable.variant(builtin.module(func.func(iree-spirv-tile-and-distribute, cse)))))' %s | FileCheck %s
 
 #config = #iree_codegen.lowering_config<tile_sizes = [[1, 0, 16], [1, 0, 1]]>
-#translation = #iree_codegen.translation_info<SPIRVDistribute>
+#translation = #iree_codegen.translation_info<SPIRVBaseDistribute>
 #pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
   #hal.descriptor_set.layout<0, bindings = [
     #hal.descriptor_set.binding<0, storage_buffer>,
@@ -33,7 +33,7 @@ hal.executable private @static_3d_sort  {
             %5 = memref.cast %4 : memref<1x32x16xi32, affine_map<(d0, d1, d2)[s0] -> (d0 * 4096 + s0 + d1 * 128 + d2)>> to memref<?x?x?xi32>
             %6 = memref.subview %1[%arg0, 0, %arg1] [1, 32, 16] [1, 1, 1] : memref<64x32x128xi32> to memref<1x32x16xi32, affine_map<(d0, d1, d2)[s0] -> (d0 * 4096 + s0 + d1 * 128 + d2)>>
             %7 = memref.cast %6 : memref<1x32x16xi32, affine_map<(d0, d1, d2)[s0] -> (d0 * 4096 + s0 + d1 * 128 + d2)>> to memref<?x32x?xi32, affine_map<(d0, d1, d2)[s0] -> (d0 * 4096 + s0 + d1 * 128 + d2)>>
-            linalg.generic {lowering_config = #config, indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (d0, d1, d2)>], iterator_types = ["parallel", "parallel", "parallel"]}
+            linalg.generic {indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (d0, d1, d2)>], iterator_types = ["parallel", "parallel", "parallel"]}
               ins(%5 : memref<?x?x?xi32>)
               outs(%6 : memref<1x32x16xi32, affine_map<(d0, d1, d2)[s0] -> (d0 * 4096 + s0 + d1 * 128 + d2)>>) {
               ^bb0(%arg4: i32, %s: i32):  // no predecessors
@@ -58,7 +58,6 @@ hal.executable private @static_3d_sort  {
 //       CHECK: scf.for
 //       CHECK:   scf.for
 //       CHECK:     %[[WG_INPUT:.+]] = memref.subview %[[ARG0]]
-//       CHECK:     %[[WG_INPUT_CAST:.+]] = memref.cast %[[WG_INPUT]]
 //       CHECK:     %[[WG_OUTPUT:.+]] = memref.subview %[[ARG1]]
 //       CHECK:     %[[TID_X:.+]] = gpu.thread_id x
 //       CHECK:     %[[DIM_X:.+]] = gpu.block_dim x
@@ -66,7 +65,7 @@ hal.executable private @static_3d_sort  {
 //       CHECK:     %[[DIM_Y:.+]] = gpu.block_dim y
 //       CHECK:     scf.for %[[IV_Y:.+]] = %[[TID_Y]] to %{{.+}} step %[[DIM_Y]]
 //       CHECK:       scf.for %[[IV_X:.+]] = %[[TID_X]] to %{{.+}} step %[[DIM_X]]
-//       CHECK:         %[[COPY_SOURCE:.+]] = memref.subview %[[WG_INPUT_CAST]][%[[IV_Y]], 0, %[[IV_X]]]
+//       CHECK:         %[[COPY_SOURCE:.+]] = memref.subview %[[WG_INPUT]][%[[IV_Y]], 0, %[[IV_X]]]
 //       CHECK:         %[[COPY_DEST:.+]] = memref.subview %[[WG_OUTPUT]][%[[IV_Y]], 0, %[[IV_X]]]
 //       CHECK:         linalg.generic {{.*}} ins(%[[COPY_SOURCE]] {{.*}} outs(%[[COPY_DEST]]
 //       CHECK:     scf.for %[[IV_Y:.+]] = %[[TID_Y]] to %{{.+}} step %[[DIM_Y]]

@@ -66,54 +66,11 @@ class ConvertToDestinationPassingStylePass
 static Value getTensorLoadOpForTensorStoreOp(
     OpBuilder &b, IREE::Flow::DispatchTensorStoreOp storeOp) {
   // Clone the offset, size and stride values. They will be CSE-ed later.
-  Operation *parentOp = storeOp->getParentOp();
-  BlockAndValueMapping indexValMap;
-  llvm::SetVector<Operation *> slice;
-  auto cloneIndexValues = [&](ArrayRef<OpFoldResult> ofrs) {
-    SmallVector<OpFoldResult> clonedVals;
-    for (auto ofr : ofrs) {
-      // Just copy the attributes.
-      if (auto attr = ofr.dyn_cast<Attribute>()) {
-        clonedVals.push_back(attr);
-        continue;
-      }
-      Value val = ofr.get<Value>();
-      // If it is a block argument use the same value.
-      if (val.isa<BlockArgument>()) {
-        clonedVals.push_back(val);
-        continue;
-      }
-      // The slice of ops needed for index computation need to be cloned to
-      // avoid use-def violations. If the value has been cloned already, reuse
-      // that.
-      if (auto lookupVal = indexValMap.lookupOrNull(val)) {
-        clonedVals.push_back(lookupVal);
-        continue;
-      }
-      slice.clear();
-      getBackwardSlice(val, &slice, [&](Operation *sliceOp) {
-        return sliceOp->getParentOp() == parentOp;
-      });
-      for (auto sliceOp : slice) {
-        if (!indexValMap.contains(sliceOp->getResult(0))) {
-          b.clone(*sliceOp, indexValMap);
-        }
-      }
-      if (Operation *definingOp = val.getDefiningOp()) {
-        b.clone(*definingOp, indexValMap);
-      }
-      clonedVals.push_back(indexValMap.lookup(val));
-    }
-    return clonedVals;
-  };
-  SmallVector<OpFoldResult> loadOffsets, loadSizes, loadStrides;
-  loadOffsets = cloneIndexValues(storeOp.getMixedOffsets());
-  loadSizes = cloneIndexValues(storeOp.getMixedSizes());
-  loadStrides = cloneIndexValues(storeOp.getMixedStrides());
+  SliceAndDynamicDims clonedVals = cloneOffsetsSizesAndStrides(b, storeOp);
   Value tensorLoadOp = b.create<IREE::Flow::DispatchTensorLoadOp>(
       storeOp.getLoc(), storeOp.getValue().getType().cast<RankedTensorType>(),
-      storeOp.getTarget(), storeOp.getTargetDims(), loadOffsets, loadSizes,
-      loadStrides);
+      storeOp.getTarget(), clonedVals.dynamicDims, clonedVals.offsets,
+      clonedVals.sizes, clonedVals.strides);
   return tensorLoadOp;
 }
 
@@ -195,11 +152,12 @@ static LogicalResult replaceDestinationBuffer(OpResult resultValue,
   return TypeSwitch<Operation *, LogicalResult>(op)
       .Case<linalg::LinalgOp, IREE::LinalgExt::LinalgExtOp>([&](auto linalgOp) {
         unsigned resultNumber = resultValue.getResultNumber();
-        linalgOp.setOutputOperand(resultNumber, destinationValue);
+        cast<DestinationStyleOpInterface>(linalgOp.getOperation())
+            .setDpsInitOperand(resultNumber, destinationValue);
         return success();
       })
-      .Case<linalg::InitTensorOp>([&](auto initTensorOp) {
-        initTensorOp.replaceAllUsesWith(destinationValue);
+      .Case<tensor::EmptyOp>([&](auto emptyTensorOp) {
+        emptyTensorOp.replaceAllUsesWith(destinationValue);
         return success();
       })
       .Default([](auto defaultOp) {
@@ -280,8 +238,8 @@ static LogicalResult convertToDestinationPassingStyle(OpBuilder &b,
 
   llvm::DenseSet<Value> processed;
   auto walkResult = funcOp.walk<WalkOrder::PreOrder>(
-      [&](linalg::InitTensorOp initTensorOp) -> WalkResult {
-        for (auto result : initTensorOp->getResults()) {
+      [&](tensor::EmptyOp emptyTensorOp) -> WalkResult {
+        for (auto result : emptyTensorOp->getResults()) {
           if (!result.getType().isa<RankedTensorType>()) continue;
           if (plan.isInStoreSet(result) && !processed.count(result)) {
             return modifyResultToUseStoreBuffer(b, result, plan, processed);
@@ -292,20 +250,19 @@ static LogicalResult convertToDestinationPassingStyle(OpBuilder &b,
   return success(!walkResult.wasInterrupted());
 }
 
-/// Multiple uses of `linalg.init_tensor` results in a copy since upstream
-/// treats `linalg.init_tensor` as an allocation and sees uses as a data-hazard
+/// Multiple uses of `tensor.empty()` results in a copy since upstream
+/// treats `tensor.empty()` as an allocation and sees uses as a data-hazard
 /// creating copies/allocations. Since the `init_tensor` op is a proxy for
 /// undef, these could just be duplicated to have a single use. This removes
 /// unnecessary data-hazards.
 static LogicalResult duplicateInitTensorOps(OpBuilder &b,
-                                            linalg::InitTensorOp initTensorOp) {
+                                            tensor::EmptyOp emptyTensorOp) {
   OpBuilder::InsertionGuard g(b);
-  b.setInsertionPoint(initTensorOp);
+  b.setInsertionPoint(emptyTensorOp);
   SmallVector<OpOperand *> uses = llvm::to_vector(llvm::map_range(
-      initTensorOp->getUses(), [](OpOperand &use) { return &use; }));
+      emptyTensorOp->getUses(), [](OpOperand &use) { return &use; }));
   for (auto use : llvm::make_range(std::next(uses.begin()), uses.end())) {
-    auto newOp =
-        cast<linalg::InitTensorOp>(b.clone(*initTensorOp.getOperation()));
+    auto newOp = cast<tensor::EmptyOp>(b.clone(*emptyTensorOp.getOperation()));
     Operation *user = use->getOwner();
     user->setOperand(use->getOperandNumber(), newOp);
   }
@@ -339,7 +296,7 @@ struct AdaptLinalgInputOperandToOutputOperand
     // There is only one result tensor.
     if (op->getNumResults() != 1) return failure();
     // The output tensor is unused in the body computation.
-    auto outputOperand = op.getOutputOperand(0);
+    auto outputOperand = op.getDpsInitOperand(0);
     if (op.payloadUsesValueFromOperand(outputOperand)) return failure();
 
     // Find an input operand which meets:
@@ -348,7 +305,7 @@ struct AdaptLinalgInputOperandToOutputOperand
     OpOperand *operand = nullptr;
     SmallVector<Value> newOperands;
     SmallVector<AffineMap> maps;
-    for (auto in : op.getInputOperands()) {
+    for (auto in : op.getDpsInputOperands()) {
       if (!operand && !isReadOnly(in->get()) &&
           op.getMatchingIndexingMap(in) ==
               op.getMatchingIndexingMap(outputOperand) &&
@@ -363,8 +320,8 @@ struct AdaptLinalgInputOperandToOutputOperand
     maps.push_back(op.getMatchingIndexingMap(operand));
 
     Location loc = op.getLoc();
-    SmallVector<StringRef> iterTypes(op.getNumLoops(),
-                                     getParallelIteratorTypeName());
+    SmallVector<utils::IteratorType> iterTypes(op.getNumLoops(),
+                                               utils::IteratorType::parallel);
     auto newOp = rewriter.create<linalg::GenericOp>(
         loc, op.getResultTypes(), newOperands, operand->get(), maps, iterTypes,
         /*bodyBuild=*/nullptr, PruneAttributeList(op));
@@ -374,7 +331,7 @@ struct AdaptLinalgInputOperandToOutputOperand
     // Repair the payload entry block.
     Block &payload = newOp.getRegion().front();
     payload.getArgument(operand->getOperandNumber())
-        .replaceAllUsesWith(payload.getArgument(op.getNumInputs()));
+        .replaceAllUsesWith(payload.getArgument(op.getNumDpsInputs()));
     payload.eraseArgument(operand->getOperandNumber());
 
     rewriter.replaceOp(op, newOp.getResults());
@@ -391,7 +348,7 @@ struct RemoveCstOutsDependency
     rewriter.startRootUpdate(op);
     bool modifiedOutput = false;
     Location loc = op.getLoc();
-    for (OpOperand *opOperand : op.getOutputOperands()) {
+    for (OpOperand *opOperand : op.getDpsInitOperands()) {
       DenseElementsAttr attr;
       if (!matchPattern(opOperand->get(), m_Constant(&attr))) continue;
       if (!attr.isSplat()) continue;
@@ -400,11 +357,11 @@ struct RemoveCstOutsDependency
       Attribute scalarAttr = attr.getValues<Attribute>()[0];
 
       modifiedOutput = true;
-      Value initTensor = rewriter.create<linalg::InitTensorOp>(
+      Value emptyTensor = rewriter.create<tensor::EmptyOp>(
           loc, type.getShape(), type.getElementType());
       Value cstOp = rewriter.create<arith::ConstantOp>(loc, scalarAttr);
       Value fillOp =
-          rewriter.create<linalg::FillOp>(loc, cstOp, initTensor).result();
+          rewriter.create<linalg::FillOp>(loc, cstOp, emptyTensor).result();
       op->setOperand(opOperand->getOperandNumber(), fillOp);
     }
     if (!modifiedOutput) {
@@ -431,18 +388,27 @@ void ConvertToDestinationPassingStylePass::runOnOperation() {
   }
 
   OpBuilder b(context);
-  SmallVector<linalg::InitTensorOp> initTensorOps;
-  funcOp.walk([&](linalg::InitTensorOp initTensorOp) {
-    initTensorOps.push_back(initTensorOp);
+  SmallVector<tensor::EmptyOp> emptyTensorOps;
+  funcOp.walk([&](tensor::EmptyOp emptyTensorOp) {
+    emptyTensorOps.push_back(emptyTensorOp);
   });
-  if (llvm::any_of(initTensorOps, [&](linalg::InitTensorOp initTensorOp) {
-        return failed(duplicateInitTensorOps(b, initTensorOp));
+  if (llvm::any_of(emptyTensorOps, [&](tensor::EmptyOp emptyTensorOp) {
+        return failed(duplicateInitTensorOps(b, emptyTensorOp));
       })) {
     return signalPassFailure();
   }
 
   if (failed(convertToDestinationPassingStyle(b, funcOp))) {
     return signalPassFailure();
+  }
+
+  // Add patterns to remove unused operands and results
+  {
+    RewritePatternSet patterns(context);
+    linalg::populateEraseUnusedOperandsAndResultsPatterns(patterns);
+    if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
+      return signalPassFailure();
+    }
   }
 }
 

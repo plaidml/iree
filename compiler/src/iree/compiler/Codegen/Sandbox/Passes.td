@@ -67,6 +67,23 @@ def LinalgFuse : Pass<"linalg-fuse", "func::FuncOp"> {
   ];
 }
 
+def LinalgSplitReduction : Pass<"linalg-split-reduction", "func::FuncOp"> {
+  let summary = "Pass to splitReduce linalg operations.";
+  let constructor = "mlir::createLinalgSplitReductionPass()";
+  let dependentDialects = [
+    "::mlir::linalg::LinalgDialect", "::mlir::scf::SCFDialect"
+  ];
+  let options = [
+    // This corresponds to the value in the last level of tiling.
+    // `size=0` triggers reading the `lowering_config` and if there's no
+    // `lowering_config`, this pass doesn't execute. Executing this pass with
+    // tile size of 1 is strictly worse than not executing the pass (and instead
+    // relying on tiling from TileAndFuse pass).
+    Option<"size", "size", "int64_t", /*default=*/"0",
+      "Size that splitReduction should use for parallel reduction results.">,
+  ];
+}
+
 def LinalgSingleTilingExpert
     : Pass<"linalg-single-tiling-expert-driver", "func::FuncOp"> {
   let summary = "Pass to drive transformations on Linalg on tensors.";
@@ -84,8 +101,6 @@ def LinalgSingleTilingExpert
     ListOption<"tileInterchange", "tile-interchange", "int64_t",
                 "Tile loop interchange",
                 "llvm::cl::ZeroOrMore">,
-    ListOption<"peeledLoops", "peeled-loops", "int64_t", "Peeled loops",
-               "llvm::cl::ZeroOrMore">,
     Option<"pad", "pad", "bool", /*default=*/"false",
       "Pad the anchor op operands.">,
     ListOption<"paddingValues", "padding-values", "std::string",
@@ -100,8 +115,6 @@ def LinalgSingleTilingExpert
     ListOption<"transposePaddings", "transpose-paddings", "std::string",
                "Transpose paddings.",
                "llvm::cl::ZeroOrMore">,
-    Option<"scalarizeDynamicDims", "scalarize-dynamic-dims", "bool",
-      /*default=*/"false", "Tile dynamic dimensions by 1.">,
 
     // Generalization options.
     Option<"generalize", "generalize", "bool", /*default=*/"false",

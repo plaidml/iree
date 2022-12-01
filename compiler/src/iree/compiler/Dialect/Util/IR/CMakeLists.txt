@@ -81,12 +81,14 @@ iree_cc_library(
     MLIRControlFlowInterfaces
     MLIRFuncDialect
     MLIRIR
+    MLIRInferTypeOpInterface
     MLIRMemRefDialect
     MLIRParser
     MLIRSideEffectInterfaces
     MLIRSupport
     MLIRTensorDialect
     MLIRTransforms
+    MLIRViewLikeInterface
   PUBLIC
 )
 

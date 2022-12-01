@@ -34,11 +34,12 @@
 #include "mlir/Conversion/MemRefToSPIRV/MemRefToSPIRV.h"
 #include "mlir/Conversion/SCFToSPIRV/SCFToSPIRV.h"
 #include "mlir/Conversion/TensorToSPIRV/TensorToSPIRV.h"
-#include "mlir/Conversion/TosaToArith/TosaToArith.h"
 #include "mlir/Conversion/VectorToSPIRV/VectorToSPIRV.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
+#include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Math/Transforms/Passes.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -50,6 +51,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
@@ -229,13 +231,19 @@ struct HALInterfaceBindingSubspanConverter final
       return success();
     }
 
+    Value offset = subspanOp.getByteOffset();
+    APInt offsetInt;
+    if (offset && matchPattern(offset, m_ConstantInt(&offsetInt)) &&
+        !offsetInt.isZero()) {
+      return subspanOp.emitOpError() << "should have no or zero byte offset";
+    }
+
     Type resultType = subspanOp.getOperation()->getResult(0).getType();
     Type convertedType = this->getTypeConverter()->convertType(resultType);
     if (!convertedType) {
       return subspanOp.emitError()
              << "failed to convert SPIR-V type: " << resultType;
     }
-
     auto varOp = interfaceToResourceVars.lookup(subspanOp);
     // Fix up the variable's type.
     varOp.setTypeAttr(TypeAttr::get(convertedType));
@@ -336,23 +344,19 @@ void ConvertToSPIRVPass::runOnOperation() {
   SPIRVConversionOptions options = {};
   options.enableFastMathMode = this->enableFastMath;
   SPIRVTypeConverter typeConverter(targetAttr, options);
+  // Additionally pull in conversion rules for GPU subgroup MMA ops.
+  typeConverter.addConversion([&](gpu::MMAMatrixType type) -> Type {
+    return convertMMAToSPIRVType(type);
+  });
   RewritePatternSet patterns(&getContext());
   ScfToSPIRVContext scfToSPIRVContext;
 
   // Pull in GPU patterns to convert processor ID ops and loop ops.
   populateGPUToSPIRVPatterns(typeConverter, patterns);
+  populateGpuWMMAToSPIRVConversionPatterns(typeConverter, patterns);
 
   // Pull in SCF patterns to convert control flow ops.
   populateSCFToSPIRVPatterns(typeConverter, scfToSPIRVContext, patterns);
-
-  // Use the default 64-bit lowering for TOSA's ApplyScale operator:
-  //   This lowering widens integer types to 64-bit an performs the non-fused
-  //   operations, specifically multiply, add, and shift. Bit-widening
-  //   is used to guarantee higher-order bits are not truncated during the
-  //   multiply or add.
-  //
-  // TODO(antiagainst): Use a lowering that uses specific SPIRV intrinsics.
-  tosa::populateTosaRescaleToArithConversionPatterns(&patterns);
 
   // Pull in MemRef patterns to convert load/store ops.
   populateMemRefToSPIRVPatterns(typeConverter, patterns);
