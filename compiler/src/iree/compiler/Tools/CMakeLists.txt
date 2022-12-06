@@ -58,7 +58,7 @@ endif()
 
 # Set TPP dependence.
 if(IREE_USE_TPP)
-  set(MAYBE_TPP_LIB TPPStandalone)
+  set(MAYBE_TPP_LIB MLIRTPP)
 endif()
 
 

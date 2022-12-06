@@ -31,9 +31,9 @@
 // Should be tpp/ but OTOH we graduate by either upstreaming ops or
 // passing through LinalgExt, so this is really a temporary crutch that
 // won't land in IREE.
-#include "Standalone/Dialect/LinalgX/LinalgXDialect.h"
-#include "Standalone/Dialect/Tpp/TppDialect.h"
-#include "Standalone/Dialect/Xsmm/XsmmDialect.h"
+#include "TPP/Dialect/LinalgX/LinalgXDialect.h"
+#include "TPP/Dialect/Tpp/TppDialect.h"
+#include "TPP/Dialect/Xsmm/XsmmDialect.h"
 
 namespace mlir {
 namespace iree_compiler {

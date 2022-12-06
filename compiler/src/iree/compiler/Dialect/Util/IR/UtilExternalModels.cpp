@@ -6,7 +6,7 @@
 
 #include "iree/compiler/Dialect/Util/IR/UtilExternalModels.h"
 
-#include "Standalone/Dialect/LinalgX/LinalgXDialect.h"
+#include "TPP/Dialect/LinalgX/LinalgXDialect.h"
 #include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtDialect.h"
 #include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
@@ -18,7 +18,7 @@
 // Should be tpp/ but OTOH we graduate by either upstreaming ops or
 // passing through LinalgExt, so this is really a temporary crutch that
 // won't land in IREE.
-#include "Standalone/Dialect/LinalgX/LinalgXOps.h"
+#include "TPP/Dialect/LinalgX/LinalgXOps.h"
 
 namespace mlir {
 namespace iree_compiler {

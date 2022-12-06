@@ -28,7 +28,7 @@
 // Should be tpp/ but OTOH we graduate by either upstreaming ops or
 // passing through LinalgExt, so this is really a temporary crutch that
 // won't land in IREE.
-#include "Standalone/Dialect/LinalgX/BufferizableOpInterfaceImpl.h"
+#include "TPP/Dialect/LinalgX/BufferizableOpInterfaceImpl.h"
 
 using mlir::bufferization::AnalysisState;
 using mlir::bufferization::BufferizableOpInterface;

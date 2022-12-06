@@ -12,7 +12,6 @@
 #ifndef IREE_COMPILER_TOOLS_INIT_IREE_DIALECTS_H_
 #define IREE_COMPILER_TOOLS_INIT_IREE_DIALECTS_H_
 
-#include "Standalone/Dialect/Mathx/MathxDialect.h"
 #include "iree-dialects/Dialect/Input/InputDialect.h"
 #include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtDialect.h"
 #include "iree-dialects/Dialect/LinalgExt/Passes/Passes.h"
@@ -36,10 +35,9 @@
 // Should be tpp/ but OTOH we graduate by either upstreaming ops or
 // passing through LinalgExt, so this is really a temporary crutch that
 // won't land in IREE.
-#include "Standalone/Dialect/LinalgX/LinalgXDialect.h"
-#include "Standalone/Dialect/Mathx/MathxDialect.h"
-#include "Standalone/Dialect/Tpp/TppDialect.h"
-#include "Standalone/Dialect/Xsmm/XsmmDialect.h"
+#include "TPP/Dialect/LinalgX/LinalgXDialect.h"
+#include "TPP/Dialect/Tpp/TppDialect.h"
+#include "TPP/Dialect/Xsmm/XsmmDialect.h"
 
 namespace mlir {
 namespace iree_compiler {
@@ -55,7 +53,6 @@ inline void registerIreeDialects(DialectRegistry &registry) {
                   IREE::LinalgExt::IREELinalgExtDialect,
                   mlir::linalg::transform::LinalgTransformDialect,
                   mlir::linalgx::LinalgXDialect,
-                  mlir::mathx::MathxDialect,
                   mlir::tpp::TppDialect,
                   mlir::xsmm::XsmmDialect,
                   IREE::Stream::StreamDialect,

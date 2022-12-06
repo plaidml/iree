@@ -24,7 +24,7 @@
 // Should be tpp/ but OTOH we graduate by either upstreaming ops or
 // passing through LinalgExt, so this is really a temporary crutch that
 // won't land in IREE.
-#include "Standalone/Dialect/LinalgX/TransformOps/LinalgXTransformOps.h"
+#include "TPP/Dialect/Transform/LinalgXTransformOps.h"
 
 namespace mlir {
 namespace iree_compiler {

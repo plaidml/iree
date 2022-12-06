@@ -37,7 +37,7 @@ iree_cc_library(
     ${MAYBE_TPP_LIB}
     TPPLinalgXDialect
     TPPLinalgXTransformOps
-    TPPStandalone
+    MLIRTPP
     
     IREEDialectsTransforms
     IREELinalgExtDialect

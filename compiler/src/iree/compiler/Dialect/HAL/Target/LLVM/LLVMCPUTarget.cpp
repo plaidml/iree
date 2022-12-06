@@ -39,9 +39,9 @@
 // Should be tpp/ but OTOH we graduate by either upstreaming ops or
 // passing through LinalgExt, so this is really a temporary crutch that
 // won't land in IREE.
-#include "Standalone/Dialect/LinalgX/LinalgXDialect.h"
-#include "Standalone/Dialect/Tpp/TppDialect.h"
-#include "Standalone/Dialect/Xsmm/XsmmDialect.h"
+#include "TPP/Dialect/LinalgX/LinalgXDialect.h"
+#include "TPP/Dialect/Tpp/TppDialect.h"
+#include "TPP/Dialect/Xsmm/XsmmDialect.h"
 
 #define DEBUG_TYPE "iree-llvm-cpu-target"
 
@@ -307,20 +307,13 @@ class LLVMCPUTargetBackend final : public TargetBackend {
     }
 
     // DO NOT SUBMIT should be added in sorted order
-    unsigned importOrdinal =
-        libraryBuilder.addImport("xsmm_brgemm_dispatch_f32", /*weak=*/false);
-    importOrdinal =
-        libraryBuilder.addImport("xsmm_matmul_dispatch_f32", /*weak=*/false);
-    importOrdinal =
-        libraryBuilder.addImport("xsmm_unary_dispatch", /*weak=*/false);
-    importOrdinal =
-        libraryBuilder.addImport("xsmm_brgemm_invoke_f32", /*weak=*/false);
-    importOrdinal =
-        libraryBuilder.addImport("xsmm_matmul_invoke_f32", /*weak=*/false);
-    importOrdinal =
-        libraryBuilder.addImport("xsmm_unary_invoke", /*weak=*/false);
-    assert(importOrdinal == 5);
-
+    libraryBuilder.addImport("xsmm_brgemm_dispatch_f32", /*weak=*/false);
+    libraryBuilder.addImport("xsmm_matmul_dispatch_f32", /*weak=*/false);
+    libraryBuilder.addImport("xsmm_unary_dispatch", /*weak=*/false);
+    libraryBuilder.addImport("xsmm_brgemm_invoke_f32", /*weak=*/false);
+    libraryBuilder.addImport("xsmm_matmul_invoke_f32", /*weak=*/false);
+    libraryBuilder.addImport("xsmm_unary_invoke", /*weak=*/false);
+    
     auto queryFunctionName = std::string(kQueryFunctionName);
     if (options_.linkStatic) {
       // Static library query functions must be unique to support multiple

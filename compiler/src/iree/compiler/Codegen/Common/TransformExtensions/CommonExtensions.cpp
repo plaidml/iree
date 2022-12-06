@@ -37,7 +37,7 @@
 // Should be tpp/ but OTOH we graduate by either upstreaming ops or
 // passing through LinalgExt, so this is really a temporary crutch that
 // won't land in IREE.
-#include "Standalone/Transforms.h"
+#include "TPP/Transforms.h"
 
 using namespace mlir;
 using namespace mlir::iree_compiler;
@@ -214,11 +214,11 @@ DiagnosedSilenceableFailure transform_dialect::ApplyPatternsOp::applyToOne(
 
   // TPP patterns.
   if (getLinalgToTpp()) {
-    tpp::populateConvertLinalgToTppPatterns(patterns);
+    tpp::populateConvertLinalgToTppPatterns(patterns, /* useParallelLoops */ true);
     tpp::populateMapLinalgToTppPatterns(patterns);
   }
   if (getSwappingRelayoutPatterns())
-    tpp::populateSinkRelayoutPatterns(patterns);
+    tpp::populateSinkPackPatterns(patterns);
   if (getTppToXsmm()) tpp::populateTppToXsmmPatterns(patterns);
   if (getXsmmToFunc())
     tpp::populateXsmmToFuncPatterns(patterns, /*useExtractMetaData=*/true);
