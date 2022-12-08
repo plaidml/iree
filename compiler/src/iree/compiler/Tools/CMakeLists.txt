@@ -142,7 +142,6 @@ iree_cc_library(
     MLIRLLVMDialect
     MLIRLinalgDialect
     MLIRLinalgToLLVM
-    MLIRLinalgToSPIRV
     MLIRLinalgTransforms
     MLIRMLProgramDialect
     MLIRQuantDialect
@@ -219,20 +218,9 @@ iree_cc_library(
   SRCS
     "iree_compile_lib.cc"
   DEPS
-    ::init_llvmir_translations
-    ::init_passes_and_dialects
-    ::init_targets
     LLVMSupport
-    MLIRIR
-    MLIRSCFTransforms
-    MLIRParser
-    MLIRPass
-    MLIRSupport
-    MLIRTargetLLVMIRExport
-    iree::compiler::Codegen::Codegen
-    iree::compiler::ConstEval
-    iree::compiler::Dialect::VM::Target::init_targets
+    iree::compiler::API2::Headers
+    iree::compiler::API2::Internal::Embed
     iree::compiler::Pipelines
-    iree::compiler::Utils
   PUBLIC
 )

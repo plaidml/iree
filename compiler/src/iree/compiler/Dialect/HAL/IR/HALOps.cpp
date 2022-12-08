@@ -139,7 +139,8 @@ LogicalResult ReturnOp::verify() {
                               << op.getNumOperands() << ", expected "
                               << expectedTypes.size() << ")";
     }
-    for (auto pair : llvm::enumerate(llvm::zip(op.operands(), expectedTypes))) {
+    for (auto pair :
+         llvm::enumerate(llvm::zip(op.getOperands(), expectedTypes))) {
       auto operand = std::get<0>(pair.value());
       auto expectedType = std::get<1>(pair.value());
       if (operand.getType() != expectedType) {
@@ -413,6 +414,21 @@ void BufferViewCreateOp::getAsmResultNames(
 void BufferViewBufferOp::getAsmResultNames(
     function_ref<void(Value, StringRef)> setNameFn) {
   setNameFn(getResult(), "buffer");
+}
+
+//===----------------------------------------------------------------------===//
+// hal.channel.rank_and_count
+//===----------------------------------------------------------------------===//
+
+void ChannelCreateOp::getAsmResultNames(
+    function_ref<void(Value, StringRef)> setNameFn) {
+  setNameFn(getResult(), "channel");
+}
+
+void ChannelRankAndCountOp::getAsmResultNames(
+    function_ref<void(Value, StringRef)> setNameFn) {
+  setNameFn(getRank(), "ccl_rank");
+  setNameFn(getCount(), "ccl_count");
 }
 
 //===----------------------------------------------------------------------===//
@@ -739,7 +755,7 @@ LogicalResult ExecutableExportOp::verify() {
   // TODO(ravishankarm): The SingleBlockImplicitTerminator<"HAL::ReturnOp">
   // should generate this check, but it doesnt.
   auto returnOp = dyn_cast<ReturnOp>(body->getTerminator());
-  if (!returnOp || returnOp.operands().size() != getNumWorkgroupDims()) {
+  if (!returnOp || returnOp.getOperands().size() != getNumWorkgroupDims()) {
     return op.emitOpError("expected operation to yield ")
            << getNumWorkgroupDims() << " values";
   }
@@ -816,9 +832,9 @@ static std::array<Value, 3> calculateWorkgroupCountFromRegion(
   auto returnOp = cast<IREE::HAL::ReturnOp>(body->getTerminator());
   assert(returnOp.getNumOperands() == 3 && "must return xyz");
   return {
-      bvm.lookup(returnOp.operands()[0]),
-      bvm.lookup(returnOp.operands()[1]),
-      bvm.lookup(returnOp.operands()[2]),
+      bvm.lookup(returnOp.getOperands()[0]),
+      bvm.lookup(returnOp.getOperands()[1]),
+      bvm.lookup(returnOp.getOperands()[2]),
   };
 }
 

@@ -98,7 +98,13 @@ class ROCMTargetBackend final : public TargetBackend {
         context, b.getStringAttr(deviceID()), configAttr);
   }
 
-  void buildTranslationPassPipeline(OpPassManager &passManager) override {
+  void buildTranslationPassPipeline(IREE::HAL::ExecutableVariantOp variantOp,
+                                    OpPassManager &passManager) override {
+    // For now we disable translation if the variant has external object files.
+    // We could instead perform linking with those objects (if they're bitcode
+    // ala libdevice.bc, etc).
+    if (variantOp.isExternal()) return;
+
     buildLLVMGPUTransformPassPipeline(passManager, true);
   }
 
@@ -108,7 +114,6 @@ class ROCMTargetBackend final : public TargetBackend {
     // Perform the translation in a separate context to avoid any
     // multi-threading issues.
     llvm::LLVMContext context;
-    context.setOpaquePointers(false);
 
     // We name our files after the executable name so that they are easy to
     // track both during compilation (logs/artifacts/etc), as outputs (final

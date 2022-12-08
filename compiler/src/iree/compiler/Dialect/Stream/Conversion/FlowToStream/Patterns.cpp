@@ -229,7 +229,7 @@ struct ConvertTensorTraceOp
       IREE::Flow::TensorTraceOp op, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const override {
     SmallVector<Value> exportedTensors;
-    for (auto it : llvm::zip(op.operands(), adaptor.operands())) {
+    for (auto it : llvm::zip(op.getOperands(), adaptor.getOperands())) {
       auto tensorOperand = std::get<0>(it);
       auto resourceOperand = std::get<1>(it);
       auto source =
@@ -316,11 +316,12 @@ struct ConvertDispatchOp : public OpConversionPattern<IREE::Flow::DispatchOp> {
       }
     }
 
-    rewriter.replaceOpWithNewOp<IREE::Stream::AsyncDispatchOp>(
+    auto newOp = rewriter.replaceOpWithNewOp<IREE::Stream::AsyncDispatchOp>(
         op, resultTypes, adaptor.getWorkload(), adaptor.getEntryPoint(),
         dispatchOperands, dispatchOperandSizes, dispatchOperandOffsets,
         dispatchOperandEnds, dispatchOperandLengths, resultSizes,
         adaptor.getTiedOperandsAttr(), getAffinityFor(op));
+    newOp->setDialectAttrs(op->getDialectAttrs());
     return success();
   }
 };
@@ -393,7 +394,7 @@ static bool insertBindingOp(BlockArgument arg,
 static void convertReturnOps(Region &region) {
   region.walk([](IREE::Flow::ReturnOp oldOp) {
     OpBuilder(oldOp).create<IREE::Stream::ReturnOp>(oldOp.getLoc(),
-                                                    oldOp.operands());
+                                                    oldOp.getOperands());
     oldOp.erase();
   });
 }
@@ -478,7 +479,8 @@ struct ConvertReturnOp : public OpConversionPattern<IREE::Flow::ReturnOp> {
   LogicalResult matchAndRewrite(
       IREE::Flow::ReturnOp op, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOpWithNewOp<IREE::Stream::ReturnOp>(op, adaptor.operands());
+    rewriter.replaceOpWithNewOp<IREE::Stream::ReturnOp>(op,
+                                                        adaptor.getOperands());
     return success();
   }
 };

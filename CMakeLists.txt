@@ -266,6 +266,9 @@ option(IREE_ENABLE_MSAN "Enable memory sanitizer" OFF)
 option(IREE_ENABLE_TSAN "Enable thread sanitizer" OFF)
 option(IREE_BYTECODE_MODULE_ENABLE_TSAN "Enable thread sanitizer in IREE modules in tests" OFF)
 option(IREE_ENABLE_UBSAN "Enable undefined behavior sanitizer" OFF)
+option(IREE_ENABLE_SPLIT_DWARF "Enable gsplit-dwarf for debug information if the platform supports it" OFF)
+option(IREE_ENABLE_THIN_ARCHIVES "Enables thin ar archives (elf systems only). Disable for released static archives" OFF)
+option(IREE_LINK_COMPILER_SHARED_LIBRARY "Links IREE tools using the compiler compiled into a shared library" ON)
 
 # STREQUAL feels wrong here - we don't care about the exact true-value used,
 # ON or TRUE or something else. But we haven't been able to think of a less bad
@@ -288,12 +291,20 @@ if(IREE_BYTECODE_MODULE_ENABLE_TSAN)
   endif()
 endif()
 
-option(IREE_ENABLE_CCACHE "Use ccache if installed to speed up rebuilds." OFF)
+option(IREE_ENABLE_CCACHE
+    "[DEPRECATED: Use CMAKE_<LANG>_COMPILER_LAUNCHER configure options or environment variables instead.] Use ccache if installed."
+    OFF)
 
 if(IREE_ENABLE_CCACHE)
+  message(WARNING
+      "IREE_ENABLE_CCACHE is deprecated. Use CMAKE_<LANG>_COMPILER_LAUNCHER"
+      " configure options or environment variables instead.")
   find_program(CCACHE_PROGRAM ccache)
   if(CCACHE_PROGRAM)
       set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${CCACHE_PROGRAM}")
+  else()
+    message(SEND_ERROR
+        "IREE_ENABLE_CCACHE was set, but executable `ccache` was not found.")
   endif()
 endif()
 
@@ -356,7 +367,6 @@ list(APPEND CMAKE_MODULE_PATH
 
 include(iree_macros)
 include(iree_copts)
-include(sanitizers)
 include(iree_cc_binary)
 include(iree_cc_library)
 include(iree_cc_test)
@@ -643,6 +653,11 @@ else()
     # rules that really should have them in the first place.
     target_include_directories(LLVMSupport PUBLIC ${_COMMON_INCLUDE_DIRS})
     target_include_directories(MLIRSupport PUBLIC ${_COMMON_INCLUDE_DIRS})
+
+    # Also add a library that can be depended on to get LLVM includes setup
+    # properly. bazel_to_cmake targets this for some header only pseudo deps.
+    add_library(IREELLVMIncludeSetup INTERFACE)
+    target_include_directories(IREELLVMIncludeSetup INTERFACE ${_COMMON_INCLUDE_DIRS})
   endfunction()
   _hack_llvm_include_paths()
 endif()
@@ -769,6 +784,13 @@ add_custom_target(iree-test-deps COMMENT "Building IREE test deps")
 add_custom_target(iree-run-module-test-deps
   COMMENT
     "Building IREE run module test targets"
+)
+
+# Samples may require additional files to be built/configured and will add
+# dependencies to this target.
+add_custom_target(iree-sample-deps
+  COMMENT
+    "Building IREE sample data targets"
 )
 
 #-------------------------------------------------------------------------------

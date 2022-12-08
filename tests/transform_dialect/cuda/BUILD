@@ -27,16 +27,21 @@ iree_lit_test_suite(
     name = "lit",
     srcs = [
         "reduction.mlir",
+        "reduction_eltwise.mlir",
+        "reduction_v2.mlir",
         "softmax.mlir",
         "softmax_v2.mlir",
         # First few ops of softmax only, acts as a proxy example.
         "softmax_partial.mlir",
+        "vecadd2d.mlir",
     ],
     cfg = "//tests:lit.cfg.py",
     # transform dialect spec files are MLIR files that specify a transformation,
     # they need to be included as data.
     data = [
         "reduction_codegen_spec.mlir",
+        "reduction_eltwise_codegen_spec.mlir",
+        "reduction_v2_codegen_spec.mlir",
         "softmax_codegen_spec.mlir",
         "softmax_v2_codegen_spec.mlir",
         #
@@ -47,6 +52,7 @@ iree_lit_test_suite(
         "softmax_dispatch_spec.mlir",
         # First few ops of softmax only, acts as a proxy example.
         "softmax_partial_codegen_spec.mlir",
+        "vecadd2d_codegen_spec.mlir",
     ],
     tags = [
         # CUDA cuInit fails with sanitizer on.

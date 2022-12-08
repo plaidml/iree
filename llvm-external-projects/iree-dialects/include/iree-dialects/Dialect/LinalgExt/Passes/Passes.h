@@ -94,7 +94,7 @@ struct MaterializeEncodingInfo {
   SmallVector<int64_t> outerDimsPerm;
 };
 using MaterializeEncodingFn =
-    std::function<FailureOr<MaterializeEncodingInfo>(TensorEncoding)>;
+    std::function<FailureOr<MaterializeEncodingInfo>(RankedTensorType)>;
 
 /// TypeConverter to use for materializing the encoding.
 struct MaterializeEncodingTypeConverter : public TypeConverter {
@@ -162,6 +162,16 @@ std::unique_ptr<OperationPass<func::FuncOp>> createTopkSplitReductionPass();
 
 std::unique_ptr<OperationPass<func::FuncOp>> createLinalgExtVectorizationPass();
 
+/// Tile and decompose the winograd transform ops into a sequence
+/// of linalg ops.
+std::unique_ptr<OperationPass<func::FuncOp>>
+createTileAndDecomposeWinogradTransformPass();
+
+// Creates a pass to convert linalg convolution ops into a sequence of
+// linalg_ext.winograd.* ops and linalg.batch_matmul ops using the winograd
+// tranformation.
+std::unique_ptr<Pass> createConvertConv2DToWinogradPass();
+
 // Marker used as attribute the depth of the split reduction transformations.
 const StringLiteral kSplitReductionDepthMarker = "__split_reduction_depth__";
 
@@ -196,7 +206,7 @@ struct LinalgEnablingOptions {
 /// Create a LinalgStrategyTileAndFusePass.
 std::unique_ptr<OperationPass<func::FuncOp>>
 createLinalgStrategyTileAndFusePass(
-    StringRef opName = "", const linalg::LinalgTilingAndFusionOptions &opt = {},
+    StringRef opName = "", const scf::SCFTileAndFuseOptions &options = {},
     const LinalgExt::LinalgTransformationFilter &filter =
         LinalgExt::LinalgTransformationFilter());
 

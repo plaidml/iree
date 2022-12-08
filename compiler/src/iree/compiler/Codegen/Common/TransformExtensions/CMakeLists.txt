@@ -26,9 +26,11 @@ iree_cc_library(
   HDRS
     "CommonExtensions.h"
     "CommonExtensionsOps.h.inc"
+    "TransformMatchers.h"
   SRCS
     "CommonExtensions.cpp"
     "CommonExtensionsOps.cpp.inc"
+    "TransformMatchers.cpp"
   DEPS
     ::CommonExtensionsOpGen
 
@@ -45,11 +47,14 @@ iree_cc_library(
 
     LLVMSupport
     MLIRAffineDialect
+    MLIRAnalysis
     MLIRArithDialect
     MLIRArithUtils
     MLIRBufferizationDialect
     MLIRBufferizationTransforms
     MLIRGPUOps
+    MLIRIR
+    MLIRLinalgDialect
     MLIRLinalgTransformOps
     MLIRLinalgTransforms
     MLIRMemRefDialect

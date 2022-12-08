@@ -6,17 +6,17 @@
 
 #include "CommonExtensions.h"
 
-#include <iree/compiler/Dialect/HAL/IR/HALOps.h>
-
 #include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "iree-dialects/Dialect/LinalgTransform/SimplePatternRewriter.h"
 #include "iree-dialects/Dialect/LinalgTransform/StructuredTransformOpsExt.h"
 #include "iree-dialects/Transforms/ListenerGreedyPatternRewriteDriver.h"
+#include "iree/compiler/Codegen/Common/TransformExtensions/TransformMatchers.h"
 #include "iree/compiler/Codegen/Common/Transforms.h"
 #include "iree/compiler/Codegen/Interfaces/BufferizationInterfaces.h"
 #include "iree/compiler/Codegen/Passes.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
+#include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -31,7 +31,9 @@
 #include "mlir/Dialect/PDL/IR/PDLTypes.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Transform/IR/TransformInterfaces.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 // TODO: TPP_INTEGRATION
 // Should be tpp/ but OTOH we graduate by either upstreaming ops or
@@ -211,6 +213,10 @@ DiagnosedSilenceableFailure transform_dialect::ApplyPatternsOp::applyToOne(
   if (getSwappingPatterns())
     addSwappingPatterns(patterns, getSwapPaddingElideConditional());
   if (getAdditionalIreePatterns()) addAdditionalIreePatterns(patterns);
+  if (getBubbleCollapseExpand()) {
+    linalg::populateFoldReshapeOpsByExpansionPatterns(
+        patterns, [](OpOperand *) { return true; });
+  }
 
   // TPP patterns.
   if (getLinalgToTpp()) {
@@ -496,15 +502,14 @@ void transform_dialect::TileToForeachThreadAndWorkgroupCountRegionOp::build(
   // bugs ensue.
   MLIRContext *ctx = builder.getContext();
   auto operationType = pdl::OperationType::get(ctx);
-  auto staticTileSizesAttr = builder.getI64ArrayAttr(staticTileSizes);
 
   build(builder, result,
         /*resultTypes=*/TypeRange{operationType, operationType},
         /*target=*/target,
         /*numThreads=*/ValueRange{},
         /*tileSizes=*/dynamicTileSizes,
-        /*staticNumThreads=*/ArrayAttr(),
-        /*staticTileSizes=*/staticTileSizesAttr,
+        /*staticNumThreads=*/ArrayRef<int64_t>(),
+        /*staticTileSizes=*/staticTileSizes,
         /*mapping=*/mappingAttr);
 }
 
@@ -534,14 +539,13 @@ void transform_dialect::TileToForeachThreadAndWorkgroupCountRegionOp::build(
   // bugs ensue.
   MLIRContext *ctx = builder.getContext();
   auto operationType = pdl::OperationType::get(ctx);
-  auto staticNumThreadsAttr = builder.getI64ArrayAttr(staticNumThreads);
   build(builder, result,
         /*resultTypes=*/TypeRange{operationType, operationType},
         /*target=*/target,
         /*numThreads=*/dynamicNumThreads,
         /*tileSizes=*/ValueRange{},
-        /*staticNumThreads=*/staticNumThreadsAttr,
-        /*staticTileSizes=*/ArrayAttr(),
+        /*staticNumThreads=*/staticNumThreads,
+        /*staticTileSizes=*/ArrayRef<int64_t>(),
         /*mapping=*/mappingAttr);
 }
 
@@ -554,7 +558,8 @@ void transform_dialect::TileToForeachThreadAndWorkgroupCountRegionOp::build(
 /// pdl::OperationType handles on the fly.
 static LogicalResult lowerWorkgroupCountComputingRegion(
     transform::TransformState &state, RewriterBase &rewriter, Location loc,
-    HAL::ExecutableExportOp exportOp, ArrayRef<OpFoldResult> tileSizes) {
+    HAL::ExecutableExportOp exportOp, ArrayRef<OpFoldResult> tileSizes,
+    Optional<ArrayAttr> mapping) {
   Region &r = exportOp.getWorkgroupCount();
   if (!r.hasOneBlock()) {
     return rewriter.notifyMatchFailure(exportOp,
@@ -597,7 +602,7 @@ static LogicalResult lowerWorkgroupCountComputingRegion(
         "number of tile sizes overflow the dimension from the workload");
   }
 
-  SmallVector<OpFoldResult> workgroupCount;
+  SmallVector<OpFoldResult> workgroupCount, permutedWorkgroupCount;
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(workgroupCountOp);
   loc = workgroupCountOp.getLoc();
@@ -614,21 +619,29 @@ static LogicalResult lowerWorkgroupCountComputingRegion(
         ArrayRef<OpFoldResult>{workload[tileSize.index()], tileSize.value()});
     workgroupCount.push_back(count);
   }
-  workgroupCount = llvm::to_vector(llvm::reverse(workgroupCount));
+  // Make sure to fill unused dimensions with 1
   workgroupCount.resize(3, rewriter.getIndexAttr(1));
-  rewriter.replaceOp(workgroupCountOp, getValueOrCreateConstantIndexOp(
-                                           rewriter, loc, workgroupCount));
+  permutedWorkgroupCount.resize(3, rewriter.getIndexAttr(1));
+  int mappingId = 0;
+  for (DeviceMappingAttrInterface map : mapping->getValue()) {
+    permutedWorkgroupCount[map.getMappingId()] = workgroupCount[mappingId++];
+  }
+  rewriter.replaceOp(
+      workgroupCountOp,
+      getValueOrCreateConstantIndexOp(rewriter, loc, permutedWorkgroupCount));
   return success();
 }
 
 SmallVector<OpFoldResult> transform_dialect::
     TileToForeachThreadAndWorkgroupCountRegionOp::getMixedNumThreads() {
-  return getMixedSizes(getStaticNumThreads(), getNumThreads());
+  Builder b(getContext());
+  return getMixedValues(getStaticNumThreads(), getNumThreads(), b);
 }
 
 SmallVector<OpFoldResult> transform_dialect::
     TileToForeachThreadAndWorkgroupCountRegionOp::getMixedTileSizes() {
-  return getMixedSizes(getStaticTileSizes(), getTileSizes());
+  Builder b(getContext());
+  return getMixedValues(getStaticTileSizes(), getTileSizes(), b);
 }
 
 LogicalResult
@@ -664,7 +677,8 @@ transform_dialect::TileToForeachThreadAndWorkgroupCountRegionOp::apply(
   /// regions are created by default in IREEs compilation flow.
   IRRewriter rewriter(getContext());
   if (failed(lowerWorkgroupCountComputingRegion(
-          state, rewriter, getLoc(), exportOp.value(), getMixedTileSizes()))) {
+          state, rewriter, getLoc(), exportOp.value(), getMixedTileSizes(),
+          getMapping()))) {
     return mlir::emitDefiniteFailure(exportOp.value(),
                                      "failed to lower workgroup count region");
   }
@@ -824,20 +838,6 @@ static OneShotBufferizationOptions getBufferizationOptions() {
   return options;
 }
 
-/// Temporarily copied from IREEComprehensiveBufferizePass.cpp to avoid buying
-/// into nested pass pipeline mess.
-static LogicalResult runIREEBufferizeOnModule(
-    ModuleOp moduleOp, BufferizationOptions::AllocationFn allocationFn,
-    BufferizationOptions::DeallocationFn deallocationFn,
-    BufferizationOptions::MemCpyFn memCpyFn) {
-  OneShotBufferizationOptions options = getBufferizationOptions();
-  options.allocationFn = allocationFn;
-  options.deallocationFn = deallocationFn;
-  options.memCpyFn = memCpyFn;
-
-  return runIREEOneShotBufferize(moduleOp, options);
-}
-
 namespace {
 /// Pattern to rewrite tensor.empty to tensor.alloc.
 struct EmptyTensorLoweringPattern : public OpRewritePattern<tensor::EmptyOp> {
@@ -909,9 +909,14 @@ DiagnosedSilenceableFailure transform_dialect::IREEBufferizeOp::apply(
                                      "listener tracking failed");
 
   //   3. Run one-shot-bufferize, without the pass baggage.
+  OneShotBufferizationOptions options = getBufferizationOptions();
+  options.allocationFn = allocationFn;
+  options.deallocationFn = deallocationFn;
+  options.memCpyFn = memCpyFn;
+  options.testAnalysisOnly = getTestAnalysisOnly();
+  options.printConflicts = getPrintConflicts();
   res = state.getTopLevel()->walk([&](ModuleOp moduleOp) {
-    if (failed(runIREEBufferizeOnModule(moduleOp, allocationFn, deallocationFn,
-                                        memCpyFn)))
+    if (failed(runIREEOneShotBufferize(moduleOp, options)))
       return WalkResult::interrupt();
     return WalkResult::advance();
   });
@@ -1005,6 +1010,262 @@ DiagnosedSilenceableFailure transform_dialect::ConfigExtractPart::apply(
 
   transformResults.set(getResultConfigPart().cast<OpResult>(), results);
   return DiagnosedSilenceableFailure::success();
+}
+
+//===---------------------------------------------------------------------===//
+// EraseHALDescriptorTypeFromMemRef
+//===---------------------------------------------------------------------===//
+
+void transform_dialect::IREEEraseHALDescriptorTypeFromMemRefOp::build(
+    OpBuilder &builder, OperationState &result, Value target) {
+  result.addOperands(target);
+  MLIRContext *ctx = builder.getContext();
+  result.addTypes(pdl::OperationType::get(ctx));
+}
+
+DiagnosedSilenceableFailure
+transform_dialect::IREEEraseHALDescriptorTypeFromMemRefOp::apply(
+    transform::TransformResults &transformResults,
+    transform::TransformState &state) {
+  ArrayRef<Operation *> targetOps = state.getPayloadOps(getTarget());
+  if (targetOps.size() != 1 || !isa<func::FuncOp>(targetOps.front())) {
+    return mlir::emitDefiniteFailure(state.getTopLevel(),
+                                     "expects a func::FuncOp as the target op");
+  }
+  auto funcOp = cast<func::FuncOp>(targetOps.front());
+
+  if (failed(eraseHALDescriptorTypeFromMemRef(funcOp))) {
+    return mlir::emitDefiniteFailure(
+        state.getTopLevel(),
+        "failed to erase #hal.descriptor_type as MemRef memory space");
+  }
+
+  transformResults.set(getOperation()->getOpResult(0), targetOps.front());
+  return DiagnosedSilenceableFailure::success();
+}
+
+//===---------------------------------------------------------------------===//
+// RegisterMatchCallbacksOp
+//===---------------------------------------------------------------------===//
+
+/// Match callback for "_test_match_callback" hook. Matches any payload
+/// operations associated with operand handles unless they have the
+/// "test.iree_transform_do_not_match" attribute, in which case produces a
+/// silenceable failure.
+static DiagnosedSilenceableFailure testMatchCallbackCallback(
+    transform_dialect::MatchCallbackResult &res, Location loc,
+    const transform::TransformState &state, ValueRange handles) {
+  bool hadFailures = false;
+  for (Value handle : handles) {
+    if (llvm::any_of(state.getPayloadOps(handle), [](Operation *op) {
+          return op->hasAttr("test.iree_transform_do_not_match");
+        })) {
+      res.addPayloadGroup(ArrayRef<Operation *>());
+      hadFailures = true;
+    } else {
+      res.addPayloadGroup(state.getPayloadOps(handle));
+    }
+  }
+  if (hadFailures) return emitSilenceableFailure(loc) << "failed to match";
+  return DiagnosedSilenceableFailure::success();
+}
+
+/// Match callback for a reduction with optional leading and trailing
+/// elementwise operations. Matches *the first* occurrence of such a reduction
+/// within an op associated with the given handle.
+///
+/// Input handles:
+///
+///   - container op, must be associated with one operation.
+///
+/// Output handles:
+///
+///   - leading elementwise op, if any;
+///   - the "fill" op preceding the reduction;
+///   - reduction op;
+///   - trailing elementwise op, if any.
+static DiagnosedSilenceableFailure reductionCallback(
+    transform_dialect::MatchCallbackResult &res, Location loc,
+    const transform::TransformState &state, ValueRange handles) {
+  if (handles.size() != 1 || state.getPayloadOps(handles[0]).size() != 1) {
+    return emitSilenceableFailure(loc)
+           << "expected one handle to one operation";
+  }
+
+  transform_dialect::StructuredOpMatcher pattern, fill, leadingEltwise,
+      trailingEltwise;
+  makeGPUReductionMatcher(pattern, fill, leadingEltwise, trailingEltwise);
+
+  // TODO: need a mechanism for this to go around the entire IR,
+  // potentially with list matches for each group.
+  Operation *root = state.getPayloadOps(handles[0])[0];
+  WalkResult walkResult = root->walk([&](Operation *op) {
+    pattern.resetCapture();
+    if (!matchPattern(op, pattern)) return WalkResult::advance();
+
+    res.addPotentiallyEmptyPayloadGroup(leadingEltwise.getCaptured());
+    res.addPayloadGroup({fill.getCaptured()});
+    res.addPayloadGroup({pattern.getCaptured()});
+    res.addPotentiallyEmptyPayloadGroup(trailingEltwise.getCaptured());
+    return WalkResult::interrupt();
+  });
+
+  if (walkResult.wasInterrupted())
+    return DiagnosedSilenceableFailure::success();
+  return emitSilenceableFailure(loc) << "failed to match";
+}
+
+/// Match callback for a reduction after splitting with optional leading and
+/// trailing elementwise operations. Matches *the first* occurrence of such a
+/// reduction within an op associated with the given handle.
+///
+/// Input handles:
+///
+///   - container op, must be associated with one operation.
+///
+/// Output handles:
+///
+///   - leading elementwise op, if any;
+///   - the "fill" op preceding the original reduction;
+///   - the "fill" op preceding the split, more parallel reduction;
+///   - the split, more parallel reduction op;
+///   - reduction op;
+///   - trailing elementwise op, if any.
+static DiagnosedSilenceableFailure splitReductionCallback(
+    transform_dialect::MatchCallbackResult &res, Location loc,
+    const transform::TransformState &state, ValueRange handles) {
+  if (handles.size() != 1 || state.getPayloadOps(handles[0]).size() != 1) {
+    return emitSilenceableFailure(loc)
+           << "expected one handle to one operation";
+  }
+
+  transform_dialect::StructuredOpMatcher parallel_reduction, combiner_reduction,
+      parallel_fill, original_fill, leading, trailing;
+  makeGPUSplitReductionMatcher(parallel_reduction, combiner_reduction,
+                               parallel_fill, original_fill, leading, trailing);
+
+  // TODO: need a mechanism for this to go around the entire IR,
+  // potentially with list matches for each group.
+  Operation *root = state.getPayloadOps(handles[0])[0];
+  WalkResult walkResult = root->walk([&](Operation *op) {
+    combiner_reduction.resetCapture();
+    if (!matchPattern(op, combiner_reduction)) return WalkResult::advance();
+
+    res.addPotentiallyEmptyPayloadGroup(leading.getCaptured());
+    res.addPayloadGroup({original_fill.getCaptured()});
+    res.addPayloadGroup({parallel_fill.getCaptured()});
+    res.addPayloadGroup({parallel_reduction.getCaptured()});
+    res.addPayloadGroup({combiner_reduction.getCaptured()});
+    res.addPotentiallyEmptyPayloadGroup(trailing.getCaptured());
+    return WalkResult::interrupt();
+  });
+
+  if (walkResult.wasInterrupted())
+    return DiagnosedSilenceableFailure::success();
+  return emitSilenceableFailure(loc) << "failed to match";
+}
+
+DiagnosedSilenceableFailure transform_dialect::RegisterMatchCallbacksOp::apply(
+    transform::TransformResults &results, transform::TransformState &state) {
+  auto &registry = state.addExtension<MatchCallbacksRegistry>();
+  registry.registerCallback("_test_match_callback", testMatchCallbackCallback);
+  registry.registerCallback("reduction", reductionCallback);
+  registry.registerCallback("split_reduction", splitReductionCallback);
+  return DiagnosedSilenceableFailure::success();
+}
+
+void transform_dialect::RegisterMatchCallbacksOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  // TODO: it doesn't really modify the payload, we need a separate resource for
+  // this mapping.
+  transform::modifiesPayload(effects);
+}
+
+//===---------------------------------------------------------------------===//
+// MatchCallbackOp
+//===---------------------------------------------------------------------===//
+
+DiagnosedSilenceableFailure transform_dialect::MatchCallbackOp::apply(
+    transform::TransformResults &results, transform::TransformState &state) {
+  auto setEmptyResults = [&results, this] {
+    for (OpResult value : getResults()) {
+      results.set(value, {});
+    }
+  };
+  auto errorOut = [this, &setEmptyResults] {
+    setEmptyResults();
+    return emitSilenceableError();
+  };
+
+  auto *registry = state.getExtension<MatchCallbacksRegistry>();
+  if (!registry) return errorOut() << "match registry not available";
+
+  const MatchCallbacksRegistry::MatchCallbackFn *callback =
+      registry->get(getCallbackName());
+  if (!callback) {
+    return errorOut() << "callback '" << getCallbackName()
+                      << "' not found in the registry";
+  }
+
+  MatchCallbackResult result;
+  DiagnosedSilenceableFailure status =
+      (*callback)(result, getLoc(), state, getInputs());
+  if (!status.succeeded()) {
+    setEmptyResults();
+    if (status.isDefiniteFailure()) return status;
+    if (getFailurePropagationMode() ==
+        transform::FailurePropagationMode::Propagate) {
+      return emitSilenceableError() << "failed to match";
+    } else {
+      return DiagnosedSilenceableFailure::success();
+    }
+  }
+  if (getNumResults() != result.getNumPayloadGroups()) {
+    return errorOut()
+           << "callback produced a different number of handles than expected ( "
+           << result.getNumPayloadGroups() << " vs " << getNumResults() << " )";
+  }
+
+  for (OpResult value : getResults()) {
+    results.set(value, result.getPayloadGroup(value.getResultNumber()));
+  }
+  return DiagnosedSilenceableFailure::success();
+}
+
+void transform_dialect::MatchCallbackOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  transform::onlyReadsHandle(getInputs(), effects);
+  transform::producesHandle(getOutputs(), effects);
+  // TODO: it doesn't really modify the payload, we need a separate resource for
+  // this mapping.
+  transform::modifiesPayload(effects);
+}
+
+DiagnosedSilenceableFailure transform_dialect::TakeFirstOp::apply(
+    transform::TransformResults &results, transform::TransformState &state) {
+  SmallVector<Operation *> concatenated;
+  bool found = false;
+  for (Value handle : getInputs()) {
+    ArrayRef<Operation *> payloads = state.getPayloadOps(handle);
+    if (payloads.empty()) continue;
+    if (!found) {
+      results.set(getFirst().cast<OpResult>(), payloads);
+      found = true;
+    } else {
+      llvm::append_range(concatenated, payloads);
+    }
+  }
+
+  if (!found) results.set(getFirst().cast<OpResult>(), {});
+  results.set(getRest().cast<OpResult>(), concatenated);
+  return DiagnosedSilenceableFailure::success();
+}
+
+void transform_dialect::TakeFirstOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  transform::onlyReadsHandle(getInputs(), effects);
+  transform::producesHandle(getFirst(), effects);
+  transform::producesHandle(getRest(), effects);
 }
 
 #define GET_OP_CLASSES

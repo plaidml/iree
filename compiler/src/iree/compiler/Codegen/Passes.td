@@ -25,6 +25,11 @@ def ConvertToDestinationPassingStyle :
   let summary =
       "Transforms the code to make the dispatch use destination-passing style";
   let constructor = "mlir::iree_compiler::createConvertToDestinationPassingStylePass()";
+  let options = [
+    Option<"useWARForCooperativeMatrixCodegen", "use-war-for-cooperative-matrix-codegen",
+           "bool", /*default=*/"false",
+           "WAR for failure in Cooperative matrix codegen pipelines. See #10648.">
+  ];
 }
 
 def DecomposeLinalgGeneric :
@@ -282,6 +287,13 @@ def ConcretizePadResultShape :
       "Concretizes tensor.pad op's result shape if its source op"
       "implements OffsetSizeAndStrideOpInterface.";
   let constructor = "mlir::iree_compiler::createConcretizePadResultShapePass()";
+}
+
+def EraseHALDescriptorTypeFromMemRef :
+    Pass<"iree-codegen-erase-hal-descriptor-type-from-memref", "func::FuncOp"> {
+  let summary = "Erase #hal.descriptor_type from MemRef memory space";
+  let constructor =
+      "mlir::iree_compiler::createEraseHALDescriptorTypeFromMemRefPass()";
 }
 
 //------------------------------------------------------------------------------
@@ -546,6 +558,17 @@ def SPIRVEmulateI64 :
     Pass<"iree-spirv-emulate-i64", "ModuleOp"> {
   let summary = "Emulate 64-bit integer opts with 32-bit integer ops";
   let constructor = "mlir::iree_compiler::createSPIRVEmulateI64Pass()";
+}
+
+def SPIRVMapMemRefStorageClass :
+    Pass<"iree-spirv-map-memref-storage-class", "func::FuncOp"> {
+  let summary = "Map MemRef memory spaces to SPIR-V storage classes";
+  let constructor = "mlir::iree_compiler::createSPIRVMapMemRefStorageClassPass()";
+}
+
+def SPIRVAnnotateWinogradLoops : Pass<"iree-spirv-annotate-winograd-loops", "func::FuncOp"> {
+  let summary = "Annotate innermost Winograd loops with spirv distribute attribute";
+  let constructor = "mlir::iree_compiler::createSPIRVAnnotateWinogradLoopsPass()";
 }
 
 //------------------------------------------------------------------------------

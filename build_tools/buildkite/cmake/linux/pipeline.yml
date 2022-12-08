@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 env:
-  DOCKER_IMAGE: "gcr.io/iree-oss/frontends@sha256:4b8f97bccf8443f0314d25c2737a46c979d9acffd28ad52f7d0ce5b879449da5"
+  DOCKER_IMAGE: "gcr.io/iree-oss/frontends@sha256:e70c8a13ce02fed19fd9407517d8f945070ecd2e2a97657d4d3117ac6d7e0030"
   IREE_DOCKER_WORKDIR: "/usr/src/github/iree"
 
 steps:
@@ -74,6 +74,28 @@ steps:
     artifact_paths:
       - "benchmark-suites-*-${BUILDKITE_BUILD_NUMBER}.tgz"
       - "source-mlir-models-${BUILDKITE_BUILD_NUMBER}.tgz"
+
+  - label: ":hammer_and_wrench: Build linux benchmark tools"
+    key: "build-linux-benchmark-tools"
+    commands: |
+      # Builds tools on the host and assumes the builder is Linux x86_64.
+      docker run --user=$(id -u):$(id -g) \
+        --volume="$${HOME?}:$${HOME?}" \
+        --volume="/etc/passwd:/etc/passwd:ro" \
+        --volume="/etc/group:/etc/group:ro" \
+        --volume="$$PWD:$$IREE_DOCKER_WORKDIR" \
+        --workdir="$$IREE_DOCKER_WORKDIR" \
+        --env "BUILD_PRESET=benchmark" \
+        --rm \
+        $${DOCKER_IMAGE} \
+        build_tools/cmake/build_runtime.sh build-linux
+      tar -czvf iree-linux-tools-${BUILDKITE_BUILD_NUMBER}.tgz \
+        build-linux/tools/iree-benchmark-module \
+        build-linux/tools/build_config.txt
+    agents:
+      - "queue=build"
+    artifact_paths:
+      - "iree-linux-tools-${BUILDKITE_BUILD_NUMBER}.tgz"
 
   - wait
 

@@ -17,6 +17,7 @@
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -71,11 +72,8 @@ llvm::StringMap<IREE::HAL::ExecutableExportOp> getAllEntryPoints(
   return exportOps;
 }
 
-/// Returns the StringAttr with the name `stringAttr` in the configuration of
-/// `variantOp`, in found.
-static Optional<StringAttr> getConfigStringAttr(
-    IREE::HAL::ExecutableVariantOp variantOp, StringRef stringAttr) {
-  IREE::HAL::ExecutableTargetAttr targetAttr = variantOp.getTarget();
+Optional<StringAttr> getConfigStringAttr(
+    IREE::HAL::ExecutableTargetAttr targetAttr, StringRef stringAttr) {
   if (!targetAttr) return llvm::None;
   auto config = targetAttr.getConfiguration();
   if (!config) return llvm::None;
@@ -84,41 +82,56 @@ static Optional<StringAttr> getConfigStringAttr(
   return attr;
 }
 
-/// Returns the LLVM Target triple associated with the `hal.executable.variant`
-/// operation if set.
-static Optional<llvm::Triple> getTargetTriple(
-    IREE::HAL::ExecutableVariantOp variantOp) {
-  auto triple = getConfigStringAttr(variantOp, "target_triple");
+Optional<IntegerAttr> getConfigIntegerAttr(
+    IREE::HAL::ExecutableTargetAttr targetAttr, StringRef integerAttr) {
+  if (!targetAttr) return llvm::None;
+  auto config = targetAttr.getConfiguration();
+  if (!config) return llvm::None;
+  auto attr = config.getAs<IntegerAttr>(integerAttr);
+  if (!attr) return llvm::None;
+  return attr;
+}
+
+Optional<llvm::Triple> getTargetTriple(
+    IREE::HAL::ExecutableTargetAttr targetAttr) {
+  auto triple = getConfigStringAttr(targetAttr, "target_triple");
   if (!triple) return llvm::None;
   return llvm::Triple(triple.value().str());
 }
 
 /// Returns the CPU target features associated with the `hal.executable.variant`
 /// operation, if set.
-static Optional<StringRef> getCpuFeatures(
-    IREE::HAL::ExecutableVariantOp variantOp) {
-  auto cpuFeatures = getConfigStringAttr(variantOp, "cpu_features");
+Optional<StringRef> getCpuFeatures(IREE::HAL::ExecutableTargetAttr targetAttr) {
+  auto cpuFeatures = getConfigStringAttr(targetAttr, "cpu_features");
   if (!cpuFeatures) return llvm::None;
   return cpuFeatures->getValue();
 }
 
-bool isX86(IREE::HAL::ExecutableVariantOp variantOp) {
-  Optional<llvm::Triple> triple = getTargetTriple(variantOp);
+bool isX86(IREE::HAL::ExecutableTargetAttr targetAttr) {
+  Optional<llvm::Triple> triple = getTargetTriple(targetAttr);
   return triple && triple.value().isX86();
 }
 
-bool isAArch64(IREE::HAL::ExecutableVariantOp variantOp) {
-  Optional<llvm::Triple> triple = getTargetTriple(variantOp);
+bool isAArch64(IREE::HAL::ExecutableTargetAttr targetAttr) {
+  Optional<llvm::Triple> triple = getTargetTriple(targetAttr);
   return triple && triple.value().isAArch64();
+}
+
+bool isRISCV(IREE::HAL::ExecutableTargetAttr targetAttr) {
+  Optional<llvm::Triple> triple = getTargetTriple(targetAttr);
+  return triple && triple.value().isRISCV();
+}
+
+bool isVMVXBackend(IREE::HAL::ExecutableTargetAttr targetAttr) {
+  return targetAttr.getBackend().getValue().startswith("vmvx");
 }
 
 // TODO(dcaballe): If we have to check for a significantly large number of
 // features in the future, we may want to consider a persistent state to carry
 // over processed HAL information or keeping the TTI instance alive and query
 // subtarget features data structure.
-static bool hasFeature(IREE::HAL::ExecutableVariantOp variantOp,
-                       StringRef feature) {
-  Optional<StringRef> features = getCpuFeatures(variantOp);
+bool hasFeature(IREE::HAL::ExecutableTargetAttr targetAttr, StringRef feature) {
+  Optional<StringRef> features = getCpuFeatures(targetAttr);
   if (!features) {
     return false;
   }
@@ -136,29 +149,20 @@ static bool hasFeature(IREE::HAL::ExecutableVariantOp variantOp,
   return false;
 }
 
-/// Returns true if the 'variantOp' contains '+avx2' in its cpu features.
-bool hasAVX2Feature(IREE::HAL::ExecutableVariantOp variantOp) {
-  return hasFeature(variantOp, "+avx2");
+bool hasAVX2Feature(IREE::HAL::ExecutableTargetAttr targetAttr) {
+  return hasFeature(targetAttr, "+avx2");
 }
 
-/// Returns true if the 'variantOp' contains '+v' in its cpu features.
-bool hasVFeature(IREE::HAL::ExecutableVariantOp variantOp) {
-  return hasFeature(variantOp, "+v");
+bool hasVFeature(IREE::HAL::ExecutableTargetAttr targetAttr) {
+  return hasFeature(targetAttr, "+v");
 }
 
-/// Returns true if the 'variantOp' contains '+zve32x' in its cpu features.
-bool hasZve32xFeature(IREE::HAL::ExecutableVariantOp variantOp) {
-  return hasFeature(variantOp, "+zve32x");
+bool hasZve32xFeature(IREE::HAL::ExecutableTargetAttr targetAttr) {
+  return hasFeature(targetAttr, "+zve32x");
 }
 
-/// Returns true if the 'variantOp' contains '+zve64x' in its cpu features.
-bool hasZve64xFeature(IREE::HAL::ExecutableVariantOp variantOp) {
-  return hasFeature(variantOp, "+zve64x");
-}
-
-bool isRISCV(IREE::HAL::ExecutableVariantOp variantOp) {
-  Optional<llvm::Triple> triple = getTargetTriple(variantOp);
-  return triple && triple.value().isRISCV();
+bool hasZve64xFeature(IREE::HAL::ExecutableTargetAttr targetAttr) {
+  return hasFeature(targetAttr, "+zve64x");
 }
 
 bool isReadOnly(Value v) {
@@ -629,13 +633,54 @@ static Value buildHALWorkgroupInfoOp(OpBuilder &b, unsigned dim) {
   return b.template create<OpTy>(b.getInsertionPoint()->getLoc(), dim);
 }
 
-linalg::LinalgLoopDistributionOptions getIREELinalgLoopDistributionOptions() {
+linalg::LinalgLoopDistributionOptions getIREELinalgLoopDistributionOptions(
+    const SmallVector<int64_t> &tileSizes) {
   return {
-      [](OpBuilder &builder, Location loc, ArrayRef<Range> parallelLoopRanges) {
+      [&tileSizes](OpBuilder &builder, Location loc,
+                   ArrayRef<Range> parallelLoopRanges) {
+        SmallVector<int64_t> nonZeroTileSizes;
+        for (int64_t size : tileSizes) {
+          if (size != 0) nonZeroTileSizes.push_back(size);
+        }
         auto numParallelDims = parallelLoopRanges.size();
 
         SmallVector<linalg::ProcInfo, 3> procInfo(numParallelDims);
+        Value splitDim;
         for (size_t dim = 0; dim < numParallelDims; ++dim) {
+          if (numParallelDims > kNumMaxParallelDims &&
+              dim >= kNumMaxParallelDims - 1) {
+            if (!splitDim) {
+              splitDim =
+                  buildHALWorkgroupInfoOp<IREE::HAL::InterfaceWorkgroupIDOp>(
+                      builder, 2);
+            }
+            Value size = getValueOrCreateConstantIndexOp(
+                builder, loc,
+                parallelLoopRanges[numParallelDims - dim - 1].size);
+            Value offset = getValueOrCreateConstantIndexOp(
+                builder, loc,
+                parallelLoopRanges[numParallelDims - dim - 1].offset);
+            AffineExpr d0, d1;
+            int64_t tileSize = nonZeroTileSizes[numParallelDims - dim - 1];
+            bindSymbols(builder.getContext(), d0, d1);
+            Value numTiles = makeComposedAffineApply(
+                builder, loc, (d0 - d1).ceilDiv(tileSize), {size, offset});
+            Value dimValue;
+            if (dim == numParallelDims - 1)
+              dimValue = splitDim;
+            else {
+              dimValue =
+                  builder.create<arith::RemUIOp>(loc, splitDim, numTiles);
+              splitDim =
+                  builder.create<arith::DivUIOp>(loc, splitDim, numTiles);
+            }
+            procInfo[numParallelDims - dim - 1] = {
+                dimValue,
+                numTiles,
+                linalg::DistributionMethod::Cyclic,
+            };
+            continue;
+          }
           procInfo[numParallelDims - dim - 1] = {
               buildHALWorkgroupInfoOp<IREE::HAL::InterfaceWorkgroupIDOp>(
                   builder, dim),
@@ -662,9 +707,8 @@ void replaceMemrefUsesAndPropagateType(Operation *oldOp, Value val,
     builder.setInsertionPoint(subviewUse);
     Type newType = memref::SubViewOp::inferRankReducedResultType(
         subviewUse.getType().getShape(), val.getType().cast<MemRefType>(),
-        extractFromI64ArrayAttr(subviewUse.getStaticOffsets()),
-        extractFromI64ArrayAttr(subviewUse.getStaticSizes()),
-        extractFromI64ArrayAttr(subviewUse.getStaticStrides()));
+        subviewUse.getStaticOffsets(), subviewUse.getStaticSizes(),
+        subviewUse.getStaticStrides());
     Value newSubview = builder.create<memref::SubViewOp>(
         subviewUse->getLoc(), newType.cast<MemRefType>(), val,
         subviewUse.getMixedOffsets(), subviewUse.getMixedSizes(),

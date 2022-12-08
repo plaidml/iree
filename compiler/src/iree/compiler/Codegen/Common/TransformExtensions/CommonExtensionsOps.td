@@ -8,6 +8,7 @@
 #define IREE_COMPILER_CODEGEN_COMMON_TRANSFORMEXTENSIONS_COMMONEXTENSIONS
 
 include "mlir/Dialect/PDL/IR/PDLTypes.td"
+include "mlir/Dialect/Transform/IR/TransformAttrs.td"
 include "mlir/Dialect/Transform/IR/TransformDialect.td"
 include "mlir/Dialect/Transform/IR/TransformInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
@@ -33,6 +34,8 @@ def ApplyPatternsOp : Op<Transform_Dialect, "iree.apply_patterns",
     unspecified order:
       - additional_iree_patterns: fancy patterns we shortcut into the system,
       will need to be sliced out better in the future.
+      - bubble_collapse_expand: bubble `expand_shape` up and `collapse_shape`
+      down across Linalg ops.
       - canonicalization: adds all the canonicalization patterns of all
       registered dialects and ops.
       - promote_foreach_thread_capture_to_shared: adds patterns that rewrite
@@ -76,6 +79,7 @@ def ApplyPatternsOp : Op<Transform_Dialect, "iree.apply_patterns",
 
   let arguments = (ins PDL_Operation:$target,
                        UnitAttr:$additional_iree_patterns,
+                       UnitAttr:$bubble_collapse_expand,
                        UnitAttr:$canonicalization,
                        UnitAttr:$promote_foreach_thread_capture_to_shared,
                        UnitAttr:$rank_reducing,
@@ -131,8 +135,12 @@ def IREEBufferizeOp : Op<Transform_Dialect, "iree.bufferize",
     No handles are consumed or produced.
   }];
 
-  let arguments = (ins PDL_Operation:$target,
-                       UnitAttr:$target_gpu);
+  let arguments = (
+      ins PDL_Operation:$target,
+          UnitAttr:$target_gpu,
+          DefaultValuedAttr<BoolAttr, "false">:$test_analysis_only,
+          DefaultValuedAttr<BoolAttr, "false">:$print_conflicts
+  );
   let results = (outs PDL_Operation:$result);
 
   let assemblyFormat = "attr-dict $target";
@@ -141,6 +149,35 @@ def IREEBufferizeOp : Op<Transform_Dialect, "iree.bufferize",
   let builders = [
     OpBuilder<(ins "Value":$target, CArg<"bool", "false">:$targetGpu)>
   ];
+}
+
+def IREEEraseHALDescriptorTypeFromMemRefOp : Op<Transform_Dialect,
+    "iree.erase_hal_descriptor_type_from_memref",
+    [FunctionalStyleTransformOpTrait,
+     MemoryEffectsOpInterface,
+     DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let description = [{
+    Erase #hal.descriptor_type from MemRef memory space to ignore all IREE
+    memory space planning. This is meant to ease transitioning given that
+    various LLVM conversion upstream patterns assumes numeric memory space,
+    especially the default 0.
+
+    Return modes:
+    =============
+    The pass is ran on all FuncOp nested under the top-level op on which
+    the transform dialect interpreter pass is applied.
+
+    If any of the pass on any of the FuncOp fails, the transformation
+    definitely fails. Otherwise the transformation succeeds.
+  }];
+
+  let arguments = (ins PDL_Operation:$target);
+  let results = (outs PDL_Operation:$result);
+
+  let assemblyFormat = "attr-dict $target";
+  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
+
+  let builders = [OpBuilder<(ins "Value":$target)>];
 }
 
 def ForeachThreadToWorkgroupOp : Op<Transform_Dialect,
@@ -221,19 +258,17 @@ def TileToForeachThreadAndWorkgroupCountRegionOp :
   let arguments = (ins PDL_Operation:$target,
                    Variadic<PDL_Operation>:$num_threads,
                    Variadic<PDL_Operation>:$tile_sizes,
-                   DefaultValuedAttr<I64ArrayAttr, "{}">:$static_num_threads,
-                   DefaultValuedAttr<I64ArrayAttr, "{}">:$static_tile_sizes,
+                   DefaultValuedAttr<DenseI64ArrayAttr, "{}">:$static_num_threads,
+                   DefaultValuedAttr<DenseI64ArrayAttr, "{}">:$static_tile_sizes,
                    OptionalAttr<DeviceMappingArrayAttr>:$mapping);
   let results = (outs PDL_Operation:$foreach_thread_op,
                       PDL_Operation:$tiled_op);
   let assemblyFormat = [{
     $target oilist(
         `num_threads` custom<DynamicIndexList>($num_threads,
-                                               $static_num_threads,
-                                               "ShapedType::kDynamic") |
+                                               $static_num_threads) |
          `tile_sizes` custom<DynamicIndexList>($tile_sizes,
-                                               $static_tile_sizes,
-                                               "ShapedType::kDynamic"))
+                                               $static_tile_sizes))
     (`(` `mapping` `=` $mapping^ `)`)? attr-dict
   }];
   let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
@@ -297,6 +332,93 @@ def ConfigExtractPart :
         ::mlir::transform::TransformResults &transformResults,
         ::mlir::transform::TransformState &state);
   }];
+}
+
+def RegisterMatchCallbacksOp :
+    Op<Transform_Dialect, "iree.register_match_callbacks",
+      [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+       DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let description = [{
+    Registers named structured op matcher callbacks specific for IREE to use
+    with `transform.iree.match_callback`. This should be called before first
+    `match_callback` may be executed following the transform dialect control
+    flow.
+
+    The callbacks must have a unique name and a signature compatible with
+    `MatchCallbacksRegistry::MatchCallbackFn`, which currently means
+    `DiagnosedSilenceableFailure(MatchCallbackResult &, Location,
+     const TransformState &, ValueRange)`. The callback receives a "result",
+     followed by a location at which errors should be reported, a transform
+     state at the moment of the _match_ (not registration) and a list of
+     handle values passed as operands to the `match_callback` operation.
+     It is expected to populate the "result" object with lists of payload
+     operations that will be bound to the handles produced by the
+     `match_callback` operation. The callback may fail, at which point
+     it should produce a silenceable error. The callback currently is not
+     allowed to modify the payload IR (though this may be revised in the
+     future for the purpose of communicating the properties of the IR
+     captured by the match). Therefore, it should not have a reason to
+     produce a definite error.
+  }];
+
+  let arguments = (ins);
+  let results = (outs);
+  let assemblyFormat = "attr-dict";
+  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
+}
+
+def MatchCallbackOp :
+    Op<Transform_Dialect, "iree.match_callback",
+       [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let description = [{
+    Performs payload IR matching using a C++ callback registered beforehand.
+    The callback is identified by name and is passed the current transform
+    state and the list of handle operands, along with information necessary
+    for error propagation. See `register_match_callbacks` for the description
+    of the callback contract.
+
+    If `failure_propagation_mode` is set to `suppress`, any silenceable errors
+    in the callback (typically, "failure to match") will be ignored and the
+    resulting handles will be associated with empty lists of payload
+    operations. Otherwise, silenceable failures are propagated.
+  }];
+
+  let arguments = (ins StrAttr:$callback_name,
+                       FailurePropagationMode:$failure_propagation_mode,
+                       Variadic<TransformTypeInterface>:$inputs);
+  let results = (outs Variadic<TransformTypeInterface>:$outputs);
+  let assemblyFormat = "`failures` `(` $failure_propagation_mode `)` "
+                       "$callback_name `(` $inputs `)` attr-dict "
+                       "`:` functional-type($inputs, $outputs)";
+  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
+}
+
+def TakeFirstOp :
+    Op<Transform_Dialect, "iree.take_first",
+       [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let description = [{
+    Given an arbitrary list of handles associated with potentially empty lists
+    of payload operations, produces two new handles:
+
+      - a handle pointing to the same payload operations as the first operand
+        handle with a non-empty list of payload operations;
+      - a handle pointing to the concatenated list of payload operations
+        associated with any other handle.
+
+    Note that this does not perform any deduplication.
+
+    This operation is useful to select a single target after some potentially
+    unsuccessful matches.
+  }];
+
+  let arguments = (ins Variadic<TransformTypeInterface>:$inputs);
+  let results = (outs TransformTypeInterface:$first,
+                      TransformTypeInterface:$rest);
+  let assemblyFormat =
+      "$inputs attr-dict `:` functional-type($inputs, results)";
+  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
 }
 
 #endif // IREE_COMPILER_CODEGEN_COMMON_TRANSFORMEXTENSIONS_COMMONEXTENSIONS

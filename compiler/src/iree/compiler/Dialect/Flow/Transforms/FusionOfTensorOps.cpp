@@ -20,6 +20,7 @@
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
+#include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
@@ -265,14 +266,19 @@ struct FusionOfTensorOpsPass
       linalg::GenericOp::getCanonicalizationPatterns(fusionPatterns, context);
       tensor::ExpandShapeOp::getCanonicalizationPatterns(fusionPatterns,
                                                          context);
+      tensor::populateFoldTensorEmptyPatterns(fusionPatterns);
       tensor::CollapseShapeOp::getCanonicalizationPatterns(fusionPatterns,
                                                            context);
       context->getLoadedDialect<linalg::LinalgDialect>()
           ->getCanonicalizationPatterns(fusionPatterns);
       memref::populateResolveRankedShapeTypeResultDimsPatterns(fusionPatterns);
 
+      GreedyRewriteConfig rewriteConfig;
+      rewriteConfig.maxIterations = GreedyRewriteConfig::kNoIterationLimit;
       if (failed(applyPatternsAndFoldGreedily(funcOp->getRegions(),
-                                              std::move(fusionPatterns)))) {
+                                              std::move(fusionPatterns),
+                                              rewriteConfig))) {
+        funcOp->emitError("failed to apply fusion patterns");
         return signalPassFailure();
       }
 
@@ -307,10 +313,12 @@ struct FusionOfTensorOpsPass
           collapsingReshapePatterns, context);
       tensor::ExpandShapeOp::getCanonicalizationPatterns(
           collapsingReshapePatterns, context);
+      tensor::populateFoldTensorEmptyPatterns(collapsingReshapePatterns);
       memref::populateResolveRankedShapeTypeResultDimsPatterns(
           collapsingReshapePatterns);
       if (failed(applyPatternsAndFoldGreedily(
               funcOp->getRegions(), std::move(collapsingReshapePatterns)))) {
+        funcOp->emitError("failed to apply collapsing reshape patterns");
         return signalPassFailure();
       }
 
@@ -319,6 +327,17 @@ struct FusionOfTensorOpsPass
         funcOp->print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
         llvm::dbgs() << "\n\n";
       });
+    }
+
+    // Run some patterns that fold away a few operations.
+    {
+      RewritePatternSet opFoldingPatterns(&getContext());
+      tensor::populateFoldTensorEmptyPatterns(opFoldingPatterns);
+      if (failed(applyPatternsAndFoldGreedily(funcOp->getRegions(),
+                                              std::move(opFoldingPatterns)))) {
+        funcOp->emitError("failed to apply op folding patterns");
+        return signalPassFailure();
+      }
     }
 
     if (fuseMultiUse) {
@@ -330,7 +349,10 @@ struct FusionOfTensorOpsPass
         auto &dominanceInfo = getAnalysis<DominanceInfo>();
         FailureOr<unsigned> numOfFusableCandidates =
             fuseMultiUseProducers(funcOp, context, dominanceInfo);
-        if (failed(numOfFusableCandidates)) return signalPassFailure();
+        if (failed(numOfFusableCandidates)) {
+          funcOp->emitError("failed to fuse multi-use producers");
+          return signalPassFailure();
+        }
         if (numOfFusableCandidates.value() == 0) break;
       }
     }

@@ -34,6 +34,7 @@
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/Transforms/Transforms.h"
+#include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -82,17 +83,7 @@ static LogicalResult getTileAndDistributeConfig(
   }
 
   partitionableLoops =
-      partitionableLoopInterface.getPartitionableLoops(kNumMaxParallelDims);
-  // For now assert that number of partitionable loops are less than the
-  // supported max.
-  // TODO(ravishankarm): Relax this restriction.
-  if (partitionableLoops.size() > kNumMaxParallelDims) {
-    return rootOp.value()->emitOpError(
-               "expected number of partitionable loops to be less than or "
-               "equal to ")
-           << kNumMaxParallelDims;
-  }
-
+      partitionableLoopInterface.getPartitionableLoops(llvm::None);
   IREE::Codegen::LoweringConfigAttr rootOpConfig = getLoweringConfig(*rootOp);
   if (!rootOpConfig) {
     return rootOp.value()->emitOpError(
@@ -133,12 +124,8 @@ getMaterializationInfo(IREE::LinalgExt::PackOp packOp) {
     encodingInfo.innerTileSizes.push_back(
         tileSize.get<Attribute>().cast<IntegerAttr>().getInt());
   }
-  encodingInfo.innerDimsPos = llvm::to_vector(llvm::map_range(
-      packOp.getInnerDimsPos(),
-      [](Attribute attr) { return attr.cast<IntegerAttr>().getInt(); }));
-  encodingInfo.outerDimsPerm = llvm::to_vector(llvm::map_range(
-      packOp.getOuterDimsPerm(),
-      [](Attribute attr) { return attr.cast<IntegerAttr>().getInt(); }));
+  encodingInfo.innerDimsPos = llvm::to_vector(packOp.getInnerDimsPos());
+  encodingInfo.outerDimsPerm = llvm::to_vector(packOp.getOuterDimsPerm());
   return encodingInfo;
 }
 
@@ -168,7 +155,7 @@ struct LowerDispatchWorkgroupCountForDagRootOp
   LogicalResult matchAndRewrite(
       IREE::Flow::DispatchWorkgroupCountFromDagRootOp workgroupCountOp,
       PatternRewriter &rewriter) const override {
-    auto workloadValues = workgroupCountOp.operands();
+    auto workloadValues = workgroupCountOp.getOperands();
     SmallVector<OpFoldResult> tileSizes = llvm::to_vector(llvm::map_range(
         givenTileSizes,
         [&](int64_t v) -> OpFoldResult { return rewriter.getIndexAttr(v); }));
@@ -212,8 +199,18 @@ struct LowerDispatchWorkgroupCountForDagRootOp
     // slowest varying.
     SmallVector<Value> numWorkgroups;
     for (auto partitionedLoop : llvm::reverse(partitionedLoops)) {
-      numWorkgroups.push_back(getValueOrCreateConstantIndexOp(
-          rewriter, loc, numTiles[partitionedLoop]));
+      Value numTileAlongDim = getValueOrCreateConstantIndexOp(
+          rewriter, loc, numTiles[partitionedLoop]);
+      if (numWorkgroups.size() == kNumMaxParallelDims) {
+        // IREE runtime only has 3 ID dimensions. After all the num of tiles are
+        // combined into one.
+        AffineExpr s0 = rewriter.getAffineSymbolExpr(0);
+        AffineExpr s1 = rewriter.getAffineSymbolExpr(1);
+        numWorkgroups.back() = makeComposedAffineApply(
+            rewriter, loc, s0 * s1, {numWorkgroups.back(), numTileAlongDim});
+        continue;
+      }
+      numWorkgroups.push_back(numTileAlongDim);
     }
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
     numWorkgroups.resize(kNumMaxParallelDims, one);
@@ -378,7 +375,8 @@ void TileAndDistributeToWorkgroupsPass::runOnOperation() {
 
     auto linalgTilingOptions =
         linalg::LinalgTilingOptions()
-            .setDistributionOptions(getIREELinalgLoopDistributionOptions())
+            .setDistributionOptions(
+                getIREELinalgLoopDistributionOptions(tileSizes))
             .setInterchange(llvm::to_vector<4>(
                 llvm::map_range(interchange,
                                 [](int64_t v) -> unsigned {
@@ -416,6 +414,7 @@ void TileAndDistributeToWorkgroupsPass::runOnOperation() {
       // casting ops into tiled operations.
       RewritePatternSet patterns(context);
       linalg::populateLinalgTilingCanonicalizationPatterns(patterns);
+      tensor::populateFoldTensorEmptyPatterns(patterns);
       populateFoldAffineMinInDistributedLoopsPatterns(patterns);
       context->getOrLoadDialect<IREE::LinalgExt::IREELinalgExtDialect>()
           ->getCanonicalizationPatterns(patterns);

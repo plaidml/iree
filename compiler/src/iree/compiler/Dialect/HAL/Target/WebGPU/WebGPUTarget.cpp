@@ -48,10 +48,10 @@ static spirv::TargetEnvAttr getWebGPUTargetEnv(MLIRContext *context) {
   auto triple = spirv::VerCapExtAttr::get(
       spirv::Version::V_1_0, {spirv::Capability::Shader},
       {spirv::Extension::SPV_KHR_storage_buffer_storage_class}, context);
-  return spirv::TargetEnvAttr::get(triple, spirv::Vendor::Unknown,
-                                   spirv::DeviceType::Unknown,
-                                   spirv::TargetEnvAttr::kUnknownDeviceID,
-                                   spirv::getDefaultResourceLimits(context));
+  return spirv::TargetEnvAttr::get(
+      triple, spirv::getDefaultResourceLimits(context),
+      spirv::ClientAPI::WebGPU, spirv::Vendor::Unknown,
+      spirv::DeviceType::Unknown, spirv::TargetEnvAttr::kUnknownDeviceID);
 }
 
 class WebGPUTargetBackend : public TargetBackend {
@@ -84,7 +84,11 @@ class WebGPUTargetBackend : public TargetBackend {
         context, b.getStringAttr(deviceID()), configAttr);
   }
 
-  void buildTranslationPassPipeline(OpPassManager &passManager) override {
+  void buildTranslationPassPipeline(IREE::HAL::ExecutableVariantOp variantOp,
+                                    OpPassManager &passManager) override {
+    // For now we disable translation if the variant has external object files.
+    if (variantOp.isExternal()) return;
+
     // WebGPU does not support push constants (yet?), so replace loads from
     // push constants with loads from uniform buffers.
     // The corresponding runtime code must perform similar emulation, based

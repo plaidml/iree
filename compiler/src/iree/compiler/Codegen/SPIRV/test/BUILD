@@ -18,6 +18,7 @@ iree_lit_test_suite(
     name = "lit",
     srcs = enforce_glob(
         [
+            "annotate_winograd_loops.mlir",
             "break_down_large_vector.mlir",
             "config_adreno_conv.mlir",
             "config_adreno_matmul.mlir",
@@ -39,11 +40,12 @@ iree_lit_test_suite(
             "emulate_i64.mlir",
             "illegal_configuration.mlir",
             "lowering_matmul_promotion.mlir",
+            "lowering_reduction.mlir",
+            "map_memref_storage_class.mlir",
             "pipeline_matmul_cooperative_ops.mlir",
             "pipeline_matmul_promotion.mlir",
             "pipeline_matmul_vectorization.mlir",
             "pipeline_reduction_subgroup.mlir",
-            "reduction_lowering.mlir",
             "tile_and_distribute.mlir",
             "tile_and_distribute_scatter.mlir",
             "tile_and_distribute_sort.mlir",

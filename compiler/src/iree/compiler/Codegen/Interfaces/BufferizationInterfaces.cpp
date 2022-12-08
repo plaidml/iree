@@ -34,8 +34,8 @@ using mlir::bufferization::AnalysisState;
 using mlir::bufferization::BufferizableOpInterface;
 using mlir::bufferization::BufferizationAliasInfo;
 using mlir::bufferization::BufferizationOptions;
-using mlir::bufferization::DialectAnalysisState;
 using mlir::bufferization::eliminateEmptyTensors;
+using mlir::bufferization::OneShotAnalysisState;
 using mlir::bufferization::OneShotBufferizationOptions;
 using mlir::bufferization::replaceOpWithBufferizedValues;
 using mlir::bufferization::replaceOpWithNewBufferizedOp;
@@ -64,7 +64,8 @@ static Value findOrCreateSubspanBuffer(
                         .dyn_cast<IREE::Flow::DispatchTensorType>();
   assert(shapedType && shapedType.hasRank());
 
-  auto memRefType = getMemrefTypeForTensor(shapedType);
+  auto memRefType = getMemrefTypeForTensor(shapedType, /*layout=*/{},
+                                           subspanOp.getDescriptorTypeAttr());
 
   // Look for an existing op.
   Block *block = subspanOp->getBlock();
@@ -293,8 +294,8 @@ static LogicalResult bufferizeLinalgExtOp(RewriterBase &rewriter,
   // Clone the op, but use the new operands. Move the existing block into the
   // new op. Since the new op does not have any tensor results, it does not
   // return anything.
-  auto newOp = cast<IREE::LinalgExt::LinalgExtOp>(dspOp.cloneWithoutRegions(
-      rewriter, op.getLoc(), /*resultTypes=*/TypeRange{}, newOperands));
+  auto newOp = cast<IREE::LinalgExt::LinalgExtOp>(mlir::cloneWithoutRegions(
+      rewriter, op, /*resultTypes=*/TypeRange{}, newOperands));
   int64_t numRegions = op->getNumRegions();
   for (int64_t i = 0; i < numRegions; ++i) {
     rewriter.inlineRegionBefore(op->getRegion(i), newOp->getRegion(i),
@@ -448,6 +449,12 @@ void registerBufferizationInterfaces(DialectRegistry &registry) {
             LinalgExtOpInterface<IREE::LinalgExt::SortOp>>(*ctx);
         IREE::LinalgExt::TopkOp::attachInterface<
             LinalgExtOpInterface<IREE::LinalgExt::TopkOp>>(*ctx);
+        IREE::LinalgExt::WinogradInputTransformOp::attachInterface<
+            LinalgExtOpInterface<IREE::LinalgExt::WinogradInputTransformOp>>(
+            *ctx);
+        IREE::LinalgExt::WinogradOutputTransformOp::attachInterface<
+            LinalgExtOpInterface<IREE::LinalgExt::WinogradOutputTransformOp>>(
+            *ctx);
       });
 }
 

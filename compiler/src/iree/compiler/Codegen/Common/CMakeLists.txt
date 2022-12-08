@@ -70,8 +70,11 @@ iree_cc_library(
 iree_cc_library(
   NAME
     TransformDialectJitterPass
+  HDRS
+    "TransformDialectStrategies.h"
   SRCS
     "TransformDialectJitterPass.cpp"
+    "TransformDialectStrategies.cpp"
   DEPS
     IREELinalgExtDialect
     IREELinalgExtTransformOps
@@ -79,6 +82,7 @@ iree_cc_library(
     LLVMSupport
     MLIRAffineDialect
     MLIRAffineUtils
+    MLIRAnalysis
     MLIRArithDialect
     MLIRArithTransforms
     MLIRArithUtils
@@ -128,6 +132,7 @@ iree_cc_library(
     "CleanupBufferAllocViewPass.cpp"
     "ConcretizePadResultShape.cpp"
     "ConvertToDestinationPassingStylePass.cpp"
+    "EraseHALDescriptorTypeFromMemRef.cpp"
     "FlattenMemRefSubspanPass.cpp"
     "FoldTensorExtractOpPass.cpp"
     "ForOpCanonicalizationPass.cpp"
@@ -162,6 +167,7 @@ iree_cc_library(
     MLIRLLVMDialect
     MLIRLinalgDialect
     MLIRLinalgTransforms
+    MLIRLinalgUtils
     MLIRMathDialect
     MLIRMathTransforms
     MLIRMemRefDialect
@@ -200,6 +206,7 @@ iree_cc_library(
   HDRS
     "GPUPatterns.h"
     "LinalgOpInfo.h"
+    "TransformDialectStrategies.h"
     "UserConfig.h"
   SRCS
     "DecomposeLinalgGeneric.cpp"

@@ -21,20 +21,13 @@ then
     exit 1
 fi
 
-ROOT_DIR=$(git rev-parse --show-toplevel)
-cd ${ROOT_DIR?}
-
-CMAKE_BIN=${CMAKE_BIN:-$(which cmake)}
+BUILD_DIR="build-emscripten"
 IREE_HOST_BINARY_ROOT="$(realpath ${IREE_HOST_BINARY_ROOT})"
 
-if [ -d "build-emscripten" ]
-then
-  echo "build-emscripten directory already exists. Will use cached results there."
-else
-  echo "build-emscripten directory does not already exist. Creating a new one."
-  mkdir build-emscripten
-fi
-cd build-emscripten
+source build_tools/cmake/setup_build.sh
+source build_tools/cmake/setup_ccache.sh
+
+cd "${BUILD_DIR}"
 
 # Configure using Emscripten's CMake wrapper, then build.
 emcmake "${CMAKE_BIN?}" -G Ninja .. \
@@ -54,3 +47,11 @@ echo "------------------------"
 echo "Building test deps"
 echo "------------------"
 "${CMAKE_BIN?}" --build . --target iree-test-deps -- -k 0
+
+echo "Building sample deps"
+echo "------------------"
+"${CMAKE_BIN?}" --build . --target iree-sample-deps -- -k 0
+
+if (( IREE_READ_REMOTE_CCACHE == 1 )); then
+  ccache --show-stats
+fi

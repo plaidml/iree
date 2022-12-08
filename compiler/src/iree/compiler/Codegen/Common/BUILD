@@ -99,6 +99,10 @@ iree_compiler_cc_library(
     name = "TransformDialectJitterPass",
     srcs = [
         "TransformDialectJitterPass.cpp",
+        "TransformDialectStrategies.cpp",
+    ],
+    hdrs = [
+        "TransformDialectStrategies.h",
     ],
     deps = [
         # Dialects
@@ -109,11 +113,13 @@ iree_compiler_cc_library(
         "//llvm-external-projects/iree-dialects:IREELinalgTransformDialect",
         "@llvm-project//mlir:AffineDialect",
         "@llvm-project//mlir:AffineUtils",
+        "@llvm-project//mlir:Analysis",
         "@llvm-project//mlir:AsyncDialect",
         "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:ArithUtils",
         "@llvm-project//mlir:BufferizationDialect",
         "@llvm-project//mlir:BufferizationTransforms",
+        "@llvm-project//mlir:DialectUtils",
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:GPUDialect",
         "@llvm-project//mlir:LinalgDialect",
@@ -158,6 +164,7 @@ iree_compiler_cc_library(
         "CleanupBufferAllocViewPass.cpp",
         "ConcretizePadResultShape.cpp",
         "ConvertToDestinationPassingStylePass.cpp",
+        "EraseHALDescriptorTypeFromMemRef.cpp",
         "FlattenMemRefSubspanPass.cpp",
         "FoldTensorExtractOpPass.cpp",
         "ForOpCanonicalizationPass.cpp",
@@ -208,6 +215,7 @@ iree_compiler_cc_library(
         "@llvm-project//mlir:LLVMDialect",
         "@llvm-project//mlir:LinalgDialect",
         "@llvm-project//mlir:LinalgTransforms",
+        "@llvm-project//mlir:LinalgUtils",
         "@llvm-project//mlir:MathDialect",
         "@llvm-project//mlir:MathTransforms",
         "@llvm-project//mlir:MemRefDialect",
@@ -256,6 +264,7 @@ iree_compiler_cc_library(
     hdrs = [
         "GPUPatterns.h",
         "LinalgOpInfo.h",
+        "TransformDialectStrategies.h",
         "UserConfig.h",
     ],
     deps = [

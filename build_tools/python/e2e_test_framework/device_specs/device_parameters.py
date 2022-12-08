@@ -7,3 +7,4 @@
 
 ARM_LITTLE_CORES = "little-cores"
 ARM_BIG_CORES = "big-cores"
+OCTA_CORES = "octa-cores"

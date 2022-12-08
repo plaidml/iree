@@ -75,10 +75,11 @@ namespace Codegen {
 
 TranslationInfoAttr TranslationInfoAttr::get(
     MLIRContext *context, DispatchLoweringPassPipeline passPipeline,
-    unsigned softwarePipelineDepth) {
+    unsigned softwarePipelineDepth, unsigned softwarePipelineStoreStage) {
   auto pipelineAttr =
       DispatchLoweringPassPipelineAttr::get(context, passPipeline);
-  return get(context, pipelineAttr, softwarePipelineDepth);
+  return get(context, pipelineAttr, softwarePipelineDepth,
+             softwarePipelineStoreStage);
 }
 
 DispatchLoweringPassPipeline
@@ -89,7 +90,7 @@ TranslationInfoAttr::getDispatchLoweringPassPipeline() {
 LogicalResult TranslationInfoAttr::verify(
     function_ref<InFlightDiagnostic()> emitError,
     IREE::Codegen::DispatchLoweringPassPipelineAttr passPipeline,
-    unsigned softwarePipelineDepth) {
+    unsigned softwarePipelineDepth, unsigned softwarePipelineStoreStage) {
   if (!passPipeline) {
     return emitError() << "missing pass pipeline specification";
   }
@@ -189,15 +190,17 @@ LogicalResult LoweringConfigAttr::verify(
 
 CompilationInfoAttr CompilationInfoAttr::get(
     MLIRContext *context, LoweringConfigAttr configAttr,
-    TranslationInfoAttr translationInfo, ArrayRef<int64_t> workgroupSize) {
+    TranslationInfoAttr translationInfo, ArrayRef<int64_t> workgroupSize,
+    llvm::Optional<int64_t> subgroupSize) {
   ArrayAttr workgroupSizeAttr = getI64IntegerArrayAttr(context, workgroupSize);
-  return get(context, configAttr, translationInfo, workgroupSizeAttr);
+  return get(context, configAttr, translationInfo, workgroupSizeAttr,
+             subgroupSize);
 }
 
 LogicalResult CompilationInfoAttr::verify(
     function_ref<InFlightDiagnostic()> emitError,
     LoweringConfigAttr loweringConfig, TranslationInfoAttr translationInfo,
-    ArrayAttr workgroupSize) {
+    ArrayAttr workgroupSize, llvm::Optional<int64_t> subgroupSize) {
   if (!loweringConfig) {
     return emitError() << "missing lowering config";
   }
@@ -212,7 +215,8 @@ LogicalResult CompilationInfoAttr::verify(
   }
   if (failed(TranslationInfoAttr::verify(
           emitError, translationInfo.getPassPipeline(),
-          translationInfo.getSoftwarePipelineDepth()))) {
+          translationInfo.getSoftwarePipelineDepth(),
+          translationInfo.getSoftwarePipelineStoreStage()))) {
     return failure();
   }
   if (workgroupSize) {
@@ -261,16 +265,37 @@ SmallVector<int64_t> getWorkgroupSize(IREE::HAL::ExecutableExportOp exportOp) {
   return {};
 }
 
-void setTranslationInfo(IREE::HAL::ExecutableExportOp exportOp,
-                        IREE::Codegen::TranslationInfoAttr translationInfo,
-                        ArrayRef<int64_t> workgroupSize) {
-  exportOp->setAttr(kTranslationInfoAttrName, translationInfo);
-  // The workgroup size is set on the entry point op directly.
-  if (!workgroupSize.empty()) {
-    MLIRContext *context = exportOp->getContext();
-    auto attrs = getIndexIntegerArrayAttr(context, workgroupSize);
-    exportOp.setWorkgroupSizeAttr(attrs);
+llvm::Optional<int64_t> getSubgroupSize(
+    IREE::HAL::ExecutableExportOp exportOp) {
+  if (IntegerAttr attr = exportOp.getSubgroupSizeAttr()) {
+    return attr.getValue().getSExtValue();
   }
+  return {};
+}
+
+LogicalResult setDispatchConfig(func::FuncOp entryPoint,
+                                ArrayRef<int64_t> workgroupSize,
+                                llvm::Optional<int64_t> subgroupSize) {
+  FailureOr<IREE::HAL::ExecutableExportOp> exportOp = getEntryPoint(entryPoint);
+  if (failed(exportOp)) return failure();
+  MLIRContext *context = exportOp->getContext();
+  if (!workgroupSize.empty()) {
+    auto attr = getIndexIntegerArrayAttr(context, workgroupSize);
+    exportOp->setWorkgroupSizeAttr(attr);
+  }
+  if (subgroupSize) {
+    exportOp->setSubgroupSizeAttr(Builder(context).getIndexAttr(*subgroupSize));
+  }
+  return success();
+}
+
+LogicalResult setTranslationInfo(
+    func::FuncOp entryPoint,
+    IREE::Codegen::TranslationInfoAttr translationInfo) {
+  FailureOr<IREE::HAL::ExecutableExportOp> exportOp = getEntryPoint(entryPoint);
+  if (failed(exportOp)) return failure();
+  exportOp.value()->setAttr(kTranslationInfoAttrName, translationInfo);
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

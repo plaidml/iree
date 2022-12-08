@@ -26,6 +26,7 @@ class FLOW_PureOp<string mnemonic, list<Trait> traits = []> :
 
 def FLOW_DispatchRegionOp : FLOW_PureOp<"dispatch.region", [
     Util_ShapeAwareOp,
+    AttrSizedOperandSegments,
     SingleBlockImplicitTerminator<"IREE::Flow::ReturnOp">]> {
   let summary = [{a group of ops}];
   let description = [{
@@ -38,11 +39,21 @@ def FLOW_DispatchRegionOp : FLOW_PureOp<"dispatch.region", [
     isolated from above. `dispatch.region` ops are a more lightweight
     abstraction for implementing fusion heuristics, i.e., the process of
     deciding which ops should form a dispatch region.
+
+    This op also has a second region: `workload_count`. The arguments to the 
+    region represent the workload for the dispatch, and returns the number of 
+    workgroups for the dispatch. The region is lowered directly to 
+    `workload_count` region of `dispatch.workgroups`.
   }];
 
-  let arguments = (ins FLOW_ShapeDynamicDims:$result_dims);
+  let arguments = (ins FLOW_ShapeDynamicDims:$result_dims, 
+                       Variadic<FLOW_Dim>:$workload);
+  
   let results = (outs Variadic<AnyType>:$result);
-  let regions = (region AnyRegion:$body);
+
+  let regions = (region AnyRegion:$body,
+                        AnyRegion:$workgroup_count);
+                        
   let hasCanonicalizer = 1;
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
@@ -384,9 +395,9 @@ def FLOW_DispatchTensorLoadOp : FLOW_PureOp<"dispatch.tensor.load", [
     Variadic<Index>:$offsets,
     Variadic<Index>:$sizes,
     Variadic<Index>:$strides,
-    I64ArrayAttr:$static_offsets,
-    I64ArrayAttr:$static_sizes,
-    I64ArrayAttr:$static_strides
+    DenseI64ArrayAttr:$static_offsets,
+    DenseI64ArrayAttr:$static_sizes,
+    DenseI64ArrayAttr:$static_strides
   );
   let results = (outs
     AnyRankedTensor:$result
@@ -395,11 +406,11 @@ def FLOW_DispatchTensorLoadOp : FLOW_PureOp<"dispatch.tensor.load", [
   let assemblyFormat = [{
     $source
     `,` `offsets` `=` custom<DynamicIndexList>(
-      $offsets, $static_offsets, "ShapedType::kDynamic")
+      $offsets, $static_offsets)
     `,` `sizes` `=` custom<DynamicIndexList>(
-      $sizes, $static_sizes, "ShapedType::kDynamic")
+      $sizes, $static_sizes)
     `,` `strides` `=` custom<DynamicIndexList>(
-      $strides, $static_strides, "ShapedType::kDynamic")
+      $strides, $static_strides)
     attr-dict `:` type($source) (`{` $source_dims^ `}`)?  `->` type($result)
   }];
 
@@ -448,11 +459,8 @@ def FLOW_DispatchTensorLoadOp : FLOW_PureOp<"dispatch.tensor.load", [
     // Workaround for OffsetSizeAndStrideOpInterface being incompatible with
     // prefixed accessors.
     OperandRange offsets() { return getOffsets(); }
-    ArrayAttr static_offsets() { return getStaticOffsets(); }
     OperandRange sizes() { return getSizes(); }
-    ArrayAttr static_sizes() { return getStaticSizes(); }
     OperandRange strides() { return getStrides(); }
-    ArrayAttr static_strides() { return getStaticStrides(); }
 
     /// Returns the type of the result based on the sizes.
     static RankedTensorType inferResultType
@@ -506,20 +514,20 @@ def FLOW_DispatchTensorStoreOp : FLOW_Op<"dispatch.tensor.store", [
     Variadic<Index>:$offsets,
     Variadic<Index>:$sizes,
     Variadic<Index>:$strides,
-    I64ArrayAttr:$static_offsets,
-    I64ArrayAttr:$static_sizes,
-    I64ArrayAttr:$static_strides
+    DenseI64ArrayAttr:$static_offsets,
+    DenseI64ArrayAttr:$static_sizes,
+    DenseI64ArrayAttr:$static_strides
   );
   let results = (outs);
 
   let assemblyFormat = [{
     $value `,` $target
     `,` `offsets` `=` custom<DynamicIndexList>(
-      $offsets, $static_offsets, "ShapedType::kDynamic")
+      $offsets, $static_offsets)
     `,` `sizes` `=` custom<DynamicIndexList>(
-      $sizes, $static_sizes, "ShapedType::kDynamic")
+      $sizes, $static_sizes)
     `,` `strides` `=` custom<DynamicIndexList>(
-      $strides, $static_strides, "ShapedType::kDynamic")
+      $strides, $static_strides)
     attr-dict `:` type($value) `->` type($target) (`{` $target_dims^ `}`)?
   }];
 
@@ -568,11 +576,8 @@ def FLOW_DispatchTensorStoreOp : FLOW_Op<"dispatch.tensor.store", [
     // Workaround for OffsetSizeAndStrideOpInterface being incompatible with
     // prefixed accessors.
     OperandRange offsets() { return getOffsets(); }
-    ArrayAttr static_offsets() { return getStaticOffsets(); }
     OperandRange sizes() { return getSizes(); }
-    ArrayAttr static_sizes() { return getStaticSizes(); }
     OperandRange strides() { return getStrides(); }
-    ArrayAttr static_strides() { return getStaticStrides(); }
 
     ValueRange getOperandDynamicDims(unsigned idx) {
       return idx == 0 ? getSizes() : getTargetDims();

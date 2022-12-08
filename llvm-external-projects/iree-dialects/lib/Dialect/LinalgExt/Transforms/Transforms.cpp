@@ -9,7 +9,6 @@
 #include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "iree-dialects/Dialect/LinalgExt/Passes/PassDetail.h"
 #include "iree-dialects/Dialect/LinalgExt/Passes/Passes.h"
-#include "iree-dialects/Dialect/LinalgExt/Passes/Transforms.h"
 #include "iree-dialects/Dialect/LinalgExt/Utils/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
@@ -18,10 +17,10 @@
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/Dialect/SCF/Transforms/Transforms.h"
+#include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/Utils/Utils.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
-#include "mlir/Dialect/Vector/Transforms/VectorTransforms.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -45,7 +44,7 @@ FailureOr<linalg::TileLoopNest> tileConsumerAndFuseProducers(
     const Optional<linalg::LinalgLoopDistributionOptions> &tileDistribution) {
   assert(tileSizes.size() == tileInterchange.size() &&
          "expect the number of tile sizes and interchange dims to match");
-  assert(linalg::isPermutation(tileInterchange) &&
+  assert(isPermutationVector(tileInterchange) &&
          "expect tile interchange is a permutation");
 
   // Create an empty tile loop nest.
@@ -103,96 +102,6 @@ FailureOr<linalg::TileLoopNest> tileConsumerAndFuseProducers(
   // Exit if the tile loop nest is empty since all tile sizes are zero.
   if (tileLoopNest.isEmpty())
     return failure();
-
-  return tileLoopNest;
-}
-
-namespace {
-///
-/// Linalg tile and fuse tensor ops pattern.
-///
-/// Apply tiling and fusion as a pattern.
-/// See `tileConsumerAndFuseProducers` for more details.
-struct LinalgTileAndFuseTensorOpsBasePattern : public RewritePattern {
-  // Entry point to match any LinalgOp.
-  LinalgTileAndFuseTensorOpsBasePattern(
-      MLIRContext *context, linalg::LinalgTilingAndFusionOptions options,
-      PatternBenefit benefit = 1)
-      : RewritePattern(MatchAnyOpTypeTag(), benefit, context),
-        options(std::move(options)) {}
-  // Entry point to match a specific LinalgOp.
-  LinalgTileAndFuseTensorOpsBasePattern(
-      StringRef opName, MLIRContext *context,
-      linalg::LinalgTilingAndFusionOptions options, PatternBenefit benefit = 1)
-      : RewritePattern(opName, benefit, context), options(std::move(options)) {}
-
-  /// `matchAndRewrite` implementation that returns the significant transformed
-  /// pieces of IR.
-  FailureOr<linalg::TileLoopNest>
-  returningMatchAndRewrite(Operation *op, PatternRewriter &rewriter) const;
-
-  LogicalResult matchAndRewrite(Operation *op,
-                                PatternRewriter &rewriter) const override {
-    return returningMatchAndRewrite(op, rewriter);
-  }
-
-private:
-  /// Tile sizes and interchange used to tile the root operation.
-  linalg::LinalgTilingAndFusionOptions options;
-};
-} // namespace
-
-FailureOr<mlir::linalg::TileLoopNest>
-LinalgTileAndFuseTensorOpsBasePattern::returningMatchAndRewrite(
-    Operation *op, PatternRewriter &rewriter) const {
-  linalg::LinalgOp rootOp = dyn_cast<linalg::LinalgOp>(op);
-  if (!rootOp)
-    return failure();
-
-  // Check `tileSizes` contains a tile size for every `rootOp` loop dimension.
-  if (options.tileSizes.size() < rootOp.getNumLoops())
-    return rewriter.notifyMatchFailure(op, "expect #tile sizes >= #loops");
-
-  // Check `tileInterchange` contains no entries or as many as `tileSizes`.
-  if (!options.tileInterchange.empty() &&
-      options.tileInterchange.size() != options.tileSizes.size())
-    return rewriter.notifyMatchFailure(
-        op, "expect the number of tile sizes and interchange dims to match");
-
-  // Copy the `tileSizes` and `tileInterchange` prefixes needed for `rootOp`.
-  SmallVector<int64_t> rootTileSizes(options.tileSizes.begin(),
-                                     options.tileSizes.begin() +
-                                         rootOp.getNumLoops());
-  SmallVector<int64_t> rootInterchange =
-      options.tileInterchange.empty()
-          ? llvm::to_vector<6>(llvm::seq<int64_t>(0, rootOp.getNumLoops()))
-          : SmallVector<int64_t>(options.tileInterchange.begin(),
-                                 options.tileInterchange.begin() +
-                                     rootOp.getNumLoops());
-
-  // Check `rootTileSizes` contains non-zero tile sizes.
-  if (llvm::count(rootTileSizes, 0) == static_cast<long>(rootTileSizes.size()))
-    return rewriter.notifyMatchFailure(
-        op, "expect at least one non-zero tile size");
-
-  // Check `rootInterchange` is a permutation of the `rootOp` loop dimensions.
-  // It has to be a permutation since the tiling cannot tile the same loop
-  // dimension multiple times.
-  if (!linalg::isPermutation(rootInterchange))
-    return rewriter.notifyMatchFailure(
-        op, "expect the tile interchange permutes the root loops");
-
-  // Tile `rootOp` and fuse its producers.
-  FailureOr<linalg::TileLoopNest> tileLoopNest =
-      IREE::LinalgExt::tileConsumerAndFuseProducers(
-          rewriter, rootOp, rootTileSizes, rootInterchange,
-          options.tileDistribution);
-  if (failed(tileLoopNest))
-    return rewriter.notifyMatchFailure(
-        op, "tileConsumerAndFuseProducers failed unexpectedly");
-
-  // Replace all uses of the tiled loop operation.
-  rootOp->replaceAllUsesWith(tileLoopNest->getRootOpReplacementResults());
 
   return tileLoopNest;
 }
@@ -288,6 +197,51 @@ LogicalResult LinalgSCFTilingPattern::returningMatchAndRewrite(
   return success();
 }
 
+/// Linalg tile and fuse tensor ops pattern.
+LinalgSCFTileAndFusePattern::LinalgSCFTileAndFusePattern(
+    MLIRContext *context, scf::SCFTileAndFuseOptions options,
+    LinalgExt::LinalgTransformationFilter f, PatternBenefit benefit)
+    : OpInterfaceRewritePattern<TilingInterface>(context, benefit),
+      filter(std::move(f)), options(std::move(options)) {}
+
+LinalgSCFTileAndFusePattern::LinalgSCFTileAndFusePattern(
+    StringRef opName, MLIRContext *context, scf::SCFTileAndFuseOptions options,
+    LinalgExt::LinalgTransformationFilter f, PatternBenefit benefit)
+    : OpInterfaceRewritePattern<TilingInterface>(context, benefit),
+      filter(f.addOpNameFilter(opName)), options(std::move(options)) {}
+
+LogicalResult
+LinalgSCFTileAndFusePattern::matchAndRewrite(TilingInterface op,
+                                             PatternRewriter &rewriter) const {
+  if (failed(filter.checkAndNotify(rewriter, op)))
+    return failure();
+
+  FailureOr<scf::SCFTileAndFuseResult> tiledResults =
+      tileConsumerAndFuseProducerGreedilyUsingSCFForOp(rewriter, op, options);
+  if (failed(tiledResults))
+    return rewriter.notifyMatchFailure(
+        op,
+        "tileConsumerAndFuseProducerGreedilyUsingSCFForOp failed unexpectedly");
+
+  // Replace all uses of the tiled loop operation.
+  SmallVector<Value> replacements(op->getNumResults());
+  for (auto result : llvm::enumerate(op->getResults())) {
+    auto it = tiledResults->replacements.find(result.value());
+    if (it == tiledResults->replacements.end()) {
+      replacements[result.index()] = result.value();
+    } else {
+      replacements[result.index()] = it->getSecond();
+    }
+  }
+  rewriter.replaceOp(op, replacements);
+
+  // Apply the filter if specified.
+  for (linalg::LinalgOp linalgOp : tiledResults->tiledAndFusedOps)
+    filter.replaceLinalgTransformationFilter(rewriter, linalgOp);
+
+  return success();
+}
+
 LinalgVectorizationPattern::LinalgVectorizationPattern(
     MLIRContext *context, LinalgExt::LinalgTransformationFilter f,
     PatternBenefit benefit)
@@ -378,62 +332,6 @@ LinalgPeelingPattern::matchAndRewrite(linalg::LinalgOp linalgOp,
   return success();
 }
 
-namespace {
-///
-/// Linalg tile and fuse tensor ops pattern.
-///
-/// Apply tiling and fusion as a pattern.
-/// `filter` controls LinalgTransformMarker matching and update when specified.
-/// See `tileConsumerAndFuseProducers` for more details.
-struct LinalgTileAndFuseTensorOpsPattern : public RewritePattern {
-  // Entry point to match any LinalgOp.
-  LinalgTileAndFuseTensorOpsPattern(
-      MLIRContext *context, linalg::LinalgTilingAndFusionOptions options,
-      LinalgExt::LinalgTransformationFilter f =
-          LinalgExt::LinalgTransformationFilter(),
-      PatternBenefit benefit = 1)
-      : RewritePattern(MatchAnyOpTypeTag(), benefit, context),
-        filter(std::move(f)), options(std::move(options)) {}
-  // Entry point to match a specific LinalgOp.
-  LinalgTileAndFuseTensorOpsPattern(
-      StringRef opName, MLIRContext *context,
-      linalg::LinalgTilingAndFusionOptions options,
-      LinalgExt::LinalgTransformationFilter f =
-          LinalgExt::LinalgTransformationFilter(),
-      PatternBenefit benefit = 1)
-      : RewritePattern(opName, benefit, context), filter(std::move(f)),
-        options(std::move(options)) {}
-
-  /// `matchAndRewrite` implementation that returns the significant transformed
-  /// pieces of IR.
-  FailureOr<linalg::TileLoopNest>
-  returningMatchAndRewrite(Operation *op, PatternRewriter &rewriter) const {
-    if (failed(filter.checkAndNotify(rewriter, op)))
-      return failure();
-    LinalgTileAndFuseTensorOpsBasePattern p(op->getContext(), options);
-    auto maybeTileLoopNest = p.returningMatchAndRewrite(op, rewriter);
-    if (failed(maybeTileLoopNest))
-      return failure();
-    // Apply the filter if specified.
-    for (linalg::LinalgOp linalgOp :
-         maybeTileLoopNest->getAllTiledAndFusedOps())
-      filter.replaceLinalgTransformationFilter(rewriter, linalgOp);
-    return maybeTileLoopNest;
-  }
-
-  LogicalResult matchAndRewrite(Operation *op,
-                                PatternRewriter &rewriter) const override {
-    return returningMatchAndRewrite(op, rewriter);
-  }
-
-private:
-  /// LinalgTransformMarker handles special attribute manipulations.
-  LinalgExt::LinalgTransformationFilter filter;
-  /// Tile sizes and interchange used to tile the root operation.
-  linalg::LinalgTilingAndFusionOptions options;
-};
-} // namespace
-  //
 /// Configurable pass to apply pattern-based tiling and fusion.
 struct LinalgStrategyTileAndFusePass
     : public LinalgStrategyTileAndFusePassBase<LinalgStrategyTileAndFusePass> {
@@ -441,9 +339,9 @@ struct LinalgStrategyTileAndFusePass
   LinalgStrategyTileAndFusePass() = default;
 
   LinalgStrategyTileAndFusePass(StringRef opName,
-                                linalg::LinalgTilingAndFusionOptions opt,
+                                scf::SCFTileAndFuseOptions options,
                                 LinalgExt::LinalgTransformationFilter filt)
-      : options(std::move(opt)), filter(std::move(filt)) {
+      : options(std::move(options)), filter(std::move(filt)) {
     this->anchorOpName.setValue(opName.str());
   }
 
@@ -454,10 +352,10 @@ struct LinalgStrategyTileAndFusePass
 
     RewritePatternSet tilingAndFusionPattern(funcOp.getContext());
     if (!anchorOpName.empty()) {
-      tilingAndFusionPattern.add<LinalgTileAndFuseTensorOpsPattern>(
+      tilingAndFusionPattern.add<LinalgSCFTileAndFusePattern>(
           anchorOpName, funcOp.getContext(), options, filter);
     } else {
-      tilingAndFusionPattern.add<LinalgTileAndFuseTensorOpsPattern>(
+      tilingAndFusionPattern.add<LinalgSCFTileAndFusePattern>(
           funcOp.getContext(), options, filter);
     }
     // Search the root operation using bottom up traversal.
@@ -467,7 +365,7 @@ struct LinalgStrategyTileAndFusePass
         funcOp, std::move(tilingAndFusionPattern), config);
   }
 
-  linalg::LinalgTilingAndFusionOptions options;
+  scf::SCFTileAndFuseOptions options;
   LinalgExt::LinalgTransformationFilter filter;
 };
 
@@ -670,6 +568,7 @@ struct LinalgStrategyEnablePass
     RewritePatternSet patterns =
         linalg::getLinalgTilingCanonicalizationPatterns(context);
     scf::populateSCFForLoopCanonicalizationPatterns(patterns);
+    tensor::populateFoldTensorEmptyPatterns(patterns);
     if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns))))
       return signalPassFailure();
 
@@ -788,7 +687,7 @@ struct LinalgStrategyRemoveMarkersPass
 /// Create a LinalgStrategyTileAndFusePass.
 std::unique_ptr<OperationPass<func::FuncOp>>
 createLinalgStrategyTileAndFusePass(
-    StringRef opName, const linalg::LinalgTilingAndFusionOptions &options,
+    StringRef opName, const scf::SCFTileAndFuseOptions &options,
     const LinalgExt::LinalgTransformationFilter &filter) {
   return std::make_unique<LinalgStrategyTileAndFusePass>(opName, options,
                                                          filter);
@@ -890,7 +789,7 @@ Value getInputOrPaddedInput(OpBuilder &builder, PackOp packOp) {
     // The size is less than or equal to tileSize because outer dims are all 1s.
     Optional<int64_t> tileSize =
         getConstantIntValue(tileAndPosMapping.lookup(dim));
-    assert(tileSize.hasValue() && "dynamic inner tile size is not supported");
+    assert(tileSize.has_value() && "dynamic inner tile size is not supported");
     paddedShape.push_back(tileSize.value());
   }
   auto resultType =
@@ -927,12 +826,11 @@ struct GeneralizePackOpPattern : OpRewritePattern<PackOp> {
     }
     // The dimensions map in the order of output dimensions. Since the
     // interchange is applied, we have to undo it for input.
-    if (auto outerDims = packOp.getOuterDimsPerm()) {
-      inputExprs = undoInterchange<AffineExpr>(
-          inputExprs, extractFromI64ArrayAttr(outerDims));
+    if (!packOp.getOuterDimsPerm().empty()) {
+      inputExprs =
+          undoInterchange<AffineExpr>(inputExprs, packOp.getOuterDimsPerm());
     }
-    for (auto en :
-         llvm::enumerate(extractFromI64ArrayAttr(packOp.getInnerDimsPos()))) {
+    for (auto en : llvm::enumerate(packOp.getInnerDimsPos())) {
       inputExprs[en.value()] =
           rewriter.getAffineDimExpr(inputRank + en.index());
     }
@@ -998,8 +896,7 @@ struct GeneralizeUnPackOpPattern : OpRewritePattern<UnPackOp> {
         loc, readType, unpackOp.getInput(), readOffsets, readSizes,
         readStrides);
 
-    SmallVector<int64_t> innerDimsPos =
-        extractFromI64ArrayAttr(unpackOp.getInnerDimsPos());
+    ArrayRef<int64_t> innerDimsPos = unpackOp.getInnerDimsPos();
     auto interchangeVector =
         computeInterchangeFromDimPos(innerDimsPos, outputRank);
     SmallVector<int64_t> transpShape =
@@ -1055,7 +952,7 @@ struct LinalgExtVectorizationPass
     // Apply tiling to make outer dims be all 1s.
     {
       SimpleRewriter rewriter(ctx);
-      auto packTilingOptions =
+      auto packOptions = scf::SCFTileAndFuseOptions().setTilingOptions(
           scf::SCFTilingOptions().setTileSizeComputationFunction(
               [](OpBuilder &builder, Operation *op) {
                 Location loc = op->getLoc();
@@ -1063,15 +960,16 @@ struct LinalgExtVectorizationPass
                 SmallVector<Value> tileSizes(
                     inputRank, builder.create<arith::ConstantIndexOp>(loc, 1));
                 return tileSizes;
-              });
+              }));
       auto funcOp = getOperation();
       funcOp->walk([&](LinalgExt::PackOp op) {
-        FailureOr<scf::SCFTilingResult> tilingResult = scf::tileUsingSCFForOp(
-            rewriter, cast<TilingInterface>(op.getOperation()),
-            packTilingOptions);
-        if (failed(tilingResult))
+        FailureOr<scf::SCFTileAndFuseResult> tileAndFuseResult =
+            scf::tileConsumerAndFuseProducerGreedilyUsingSCFForOp(rewriter, op,
+                                                                  packOptions);
+        if (failed(tileAndFuseResult))
           return signalPassFailure();
-        rewriter.replaceOp(op, tilingResult->replacements);
+        rewriter.replaceOp(op,
+                           tileAndFuseResult->replacements[op.getResult(0)]);
       });
 
       auto unpackTilingOptions =

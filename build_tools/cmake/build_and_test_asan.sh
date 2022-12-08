@@ -6,40 +6,24 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-# Note: this script diverges from the non-ASan build in a few ways:
-#   * The CMake build sets `IREE_ENABLE_ASAN=ON`
-#   * Omit optional components that don't work with ASan (e.g. Python bindings)
-#   * Some tests that fail under ASan are individually excluded
+# Build and test, using CMake/CTest, with AddressSanitizer instrumentation.
 #
-# The desired build directory can be passed as
-# the first argument. Otherwise, it uses the environment variable
-# IREE_ASAN_BUILD_DIR, defaulting to "build-asan". Designed for CI, but
-# can be run manually. This reuses the build directory if it already exists.
+# See https://clang.llvm.org/docs/AddressSanitizer.html. Components that don't
+# work with ASan (e.g. Python bindings) are disabled. Some tests that fail under
+# ASan are individually excluded.
 #
-# Build and test the project with CMake with ASan enabled and using
-# SwiftShader's software Vulkan driver.
-# ASan docs: https://clang.llvm.org/docs/AddressSanitizer.html
-
+# The desired build directory can be passed as the first argument. Otherwise, it
+# uses the environment variable IREE_ASAN_BUILD_DIR, defaulting to "build-asan".
+# Designed for CI, but can be run manually. It reuses the build directory if it
+# already exists. Expects to be run from the root of the IREE repository.
 
 set -xeuo pipefail
 
-ROOT_DIR="${ROOT_DIR:-$(git rev-parse --show-toplevel)}"
-cd "${ROOT_DIR}"
-
-CMAKE_BIN=${CMAKE_BIN:-$(which cmake)}
 BUILD_DIR="${1:-${IREE_ASAN_BUILD_DIR:-build-asan}}"
 IREE_ENABLE_ASSERTIONS="${IREE_ENABLE_ASSERTIONS:-ON}"
-IREE_ENABLE_CCACHE="${IREE_ENABLE_CCACHE:-OFF}"
 
-"$CMAKE_BIN" --version
-ninja --version
-
-if [[ -d "${BUILD_DIR}" ]]; then
-  echo "Build directory '${BUILD_DIR}' already exists. Will use cached results there."
-else
-  echo "Build directory '${BUILD_DIR}' does not already exist. Creating a new one."
-  mkdir "${BUILD_DIR}"
-fi
+source build_tools/cmake/setup_build.sh
+source build_tools/cmake/setup_ccache.sh
 
 CMAKE_ARGS=(
   "-G" "Ninja"
@@ -51,7 +35,6 @@ CMAKE_ARGS=(
   "-DIREE_BUILD_MICROBENCHMARKS=ON"
 
   "-DIREE_ENABLE_ASSERTIONS=${IREE_ENABLE_ASSERTIONS}"
-  "-DIREE_ENABLE_CCACHE=${IREE_ENABLE_CCACHE}"
 
   # Enable CUDA compiler and runtime builds unconditionally. Our CI images all
   # have enough deps to at least build CUDA support and compile CUDA binaries
@@ -71,9 +54,17 @@ echo "Building test deps"
 echo "------------------"
 "${CMAKE_BIN?}" --build "${BUILD_DIR?}" --target iree-test-deps -- -k 0
 
+echo "Building sample deps"
+echo "------------------"
+"${CMAKE_BIN?}" --build "${BUILD_DIR?}" --target iree-sample-deps -- -k 0
+
 echo "Building microbenchmark suites"
 echo "------------------"
 "${CMAKE_BIN?}" --build "${BUILD_DIR?}" --target iree-microbenchmark-suites -- -k 0
+
+if (( IREE_READ_REMOTE_CCACHE == 1 )); then
+  ccache --show-stats
+fi
 
 # Respect the user setting, but default to as many jobs as we have cores.
 export CTEST_PARALLEL_LEVEL=${CTEST_PARALLEL_LEVEL:-$(nproc)}

@@ -80,6 +80,8 @@ iree_check_single_backend_test_suite(
     "sort.mlir"
     "top-k.mlir"
     "unpack.mlir"
+    "winograd_input.mlir"
+    "winograd_output.mlir"
   TARGET_BACKEND
     "llvm-cpu"
   DRIVER
@@ -125,6 +127,8 @@ iree_check_single_backend_test_suite(
     "reverse.mlir"
     "scatter.mlir"
     "sort.mlir"
+    "winograd_input.mlir"
+    "winograd_output.mlir"
   TARGET_BACKEND
     "vulkan-spirv"
   DRIVER

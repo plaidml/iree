@@ -676,6 +676,71 @@ def HAL_BufferViewTraceOp : HAL_Op<"buffer_view.trace", []> {
 }
 
 //===----------------------------------------------------------------------===//
+// !hal.channel / iree_hal_channel_t
+//===----------------------------------------------------------------------===//
+
+def HAL_ChannelCreateOp : HAL_Op<"channel.create", [
+    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
+  ]> {
+  let summary = [{creates a new channel for collective communication}];
+  let description = [{
+    Returns a new channel with the given rank associated with the given device
+    queue. Collective operations using this channel must only be submitted on
+    compatible queues.
+
+    A rank or count of -1 can be used to indicate a default inherited from the
+    environment or device configuration.
+  }];
+
+  let arguments = (ins
+    HAL_Device:$device,
+    HAL_DeviceQueueAffinity:$queue_affinity,
+    // TODO(benvanik): optional discriminator for groupings.
+    // TODO(benvanik): channel ID as a `Util_BufferType:$id`.
+    // TODO(benvanik): make rank/count optional (but then would need a custom vm
+    // import pattern).
+    I32:$rank,
+    I32:$count
+  );
+  let results = (outs
+    HAL_Channel:$result
+  );
+
+  let assemblyFormat = [{
+    `device` `(` $device `:` type($device) `)`
+    `affinity` `(` $queue_affinity `)`
+    `rank` `(` $rank `)`
+    `count` `(` $count `)`
+    `:` type($result)
+    attr-dict-with-keyword
+  }];
+}
+
+def HAL_ChannelRankAndCountOp : HAL_PureOp<"channel.rank_and_count", [
+    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
+  ]> {
+  let summary = [{returns the rank of the local participant in the group}];
+  let description = [{
+    Returns the rank the channel represents as a participant in a collective
+    group in `[0, count)` and the total participant count.
+  }];
+
+  let arguments = (ins
+    HAL_Channel:$channel
+  );
+  let results = (outs
+    I32:$rank,
+    I32:$count
+  );
+
+  let assemblyFormat = [{
+    `<` $channel `:` type($channel) `>`
+    `:` type($rank) `,` type($count)
+    attr-dict-with-keyword
+  }];
+}
+
+//===----------------------------------------------------------------------===//
 // !hal.command_buffer / iree_hal_command_buffer_t
 //===----------------------------------------------------------------------===//
 
@@ -864,6 +929,45 @@ def HAL_CommandBufferCopyBufferOp : HAL_Op<"command_buffer.copy_buffer"> {
   let hasCanonicalizer = 1;
 }
 
+def HAL_CommandBufferCollectiveOp :
+  HAL_Op<"command_buffer.collective", [
+    AttrSizedOperandSegments,
+  ]> {
+  let summary = [{command buffer collective dispatch recording operation}];
+  let description = [{
+    Dispatches a collective operation defined by op using the given buffers.
+  }];
+
+  let arguments = (ins
+    HAL_CommandBuffer:$command_buffer,
+    HAL_Channel:$channel,
+    HAL_CollectiveAttr:$op,
+    HAL_DeviceSize:$element_count,
+    Optional<I32>:$param,
+    // TODO(benvanik): change this to take descriptor set + binding instead.
+    // This would let us use indirect bindings.
+    Optional<HAL_BufferType>:$send_buffer,
+    Optional<HAL_DeviceSize>:$send_offset,
+    Optional<HAL_DeviceSize>:$send_length,
+    Optional<HAL_BufferType>:$recv_buffer,
+    Optional<HAL_DeviceSize>:$recv_offset,
+    Optional<HAL_DeviceSize>:$recv_length
+  );
+
+  let assemblyFormat = [{
+    `<` $command_buffer `:` type($command_buffer) `>`
+    `channel` `(` $channel `:` type($channel) `)`
+    `op` `(` $op `)`
+    (`param` `(` $param^ `:` type($param) `)`)?
+    (`send` `(` $send_buffer^ `:` type($send_buffer) `)`
+     `` `[` $send_offset `,` $send_length `]`)?
+    (`recv` `(` $recv_buffer^ `:` type($recv_buffer) `)`
+     `` `[` $recv_offset `,` $recv_length `]`)?
+    `count` `(` $element_count `)`
+    attr-dict-with-keyword
+  }];
+}
+
 def HAL_CommandBufferPushConstantsOp :
     HAL_Op<"command_buffer.push_constants"> {
   let summary = [{command buffer push constants operation}];
@@ -1043,36 +1147,6 @@ def HAL_CommandBufferDispatchIndirectOp : HAL_Op<"command_buffer.dispatch.indire
     `` `[` $workgroups_offset `]`
     attr-dict-with-keyword
   }];
-}
-
-def HAL_ConstantStorageOp : HAL_Op<"constant_storage", [
-    Symbol,
-  ]> {
-  let summary = [{constant data storage block}];
-  let description = [{
-    Represents a packed constant storage buffer meeting the buffer constraints
-    placed on the parent pool. Referenced by other constant pool ops.
-  }];
-
-  let arguments = (ins
-    OptionalAttr<StrAttr>:$sym_visibility,
-    SymbolNameAttr:$sym_name,
-    Util_AnySerializableAttr:$value
-  );
-
-  let assemblyFormat = [{
-    custom<SymbolVisibility>($sym_visibility)
-    $sym_name `=` $value attr-dict-with-keyword
-  }];
-
-  let builders = [
-    OpBuilder<(ins
-      "StringRef":$sym_name,
-      "::mlir::Attribute":$value
-    ), [{
-      build($_builder, $_state, nullptr, sym_name, value);
-    }]>
-  ];
 }
 
 //===----------------------------------------------------------------------===//
@@ -1439,6 +1513,8 @@ def HAL_DeviceQueueExecuteOp : HAL_Op<"device.queue.execute"> {
     (`commands` `(` `[` $command_buffers^ `]` `)`)?
     attr-dict-with-keyword
   }];
+
+  let hasCanonicalizer = 1;
 }
 
 def HAL_DeviceQueueFlushOp : HAL_Op<"device.queue.flush"> {
@@ -1482,7 +1558,8 @@ def HAL_ExecutableSourceOp : HAL_Op<"executable.source", [
 
   let arguments = (ins
     OptionalAttr<StrAttr>:$sym_visibility,
-    SymbolNameAttr:$sym_name
+    SymbolNameAttr:$sym_name,
+    OptionalAttr<HAL_ExecutableObjectsAttr>:$objects
   );
 
   let regions = (region SizedRegion<1>:$body);
@@ -1497,6 +1574,10 @@ def HAL_ExecutableSourceOp : HAL_Op<"executable.source", [
 
   let extraClassDeclaration = [{
     Block& getBlock() { return getBody().front(); }
+
+    bool isExternal() {
+      return getBlock().getOps<::mlir::ModuleOp>().empty();
+    }
 
     ::mlir::ModuleOp getInnerModule() {
       auto moduleOps = getBlock().getOps<::mlir::ModuleOp>();
@@ -1587,6 +1668,7 @@ def HAL_ExecutableExportOp : HAL_Op<"executable.export", [
     OptionalAttr<HAL_OrdinalAttr>:$ordinal,
     HAL_PipelineLayoutAttr:$layout,
     OptionalAttr<HAL_WorkgroupSizeAttr>:$workgroup_size,
+    OptionalAttr<HAL_SubgroupSizeAttr>:$subgroup_size,
     OptionalAttr<IndexAttr>:$workgroup_local_memory
   );
 
@@ -1598,10 +1680,11 @@ def HAL_ExecutableExportOp : HAL_Op<"executable.export", [
       "::mlir::IntegerAttr":$ordinal,
       "IREE::HAL::PipelineLayoutAttr":$layout,
       "::mlir::ArrayAttr":$workgroup_size,
+      "::mlir::IntegerAttr":$subgroup_size,
       "::mlir::IntegerAttr":$workgroup_local_memory
     ), [{
       build($_builder, $_state, nullptr, sym_name, ordinal, layout,
-            workgroup_size, workgroup_local_memory);
+            workgroup_size, subgroup_size, workgroup_local_memory);
     }]>,
   ];
 
@@ -1644,7 +1727,8 @@ def HAL_ExecutableVariantOp : HAL_Op<"executable.variant", [
   let arguments = (ins
     OptionalAttr<StrAttr>:$sym_visibility,
     SymbolNameAttr:$sym_name,
-    HAL_ExecutableTargetAttr:$target
+    HAL_ExecutableTargetAttr:$target,
+    OptionalAttr<HAL_ExecutableObjectArrayAttr>:$objects
   );
 
   let regions = (region SizedRegion<1>:$body);
@@ -1653,6 +1737,7 @@ def HAL_ExecutableVariantOp : HAL_Op<"executable.variant", [
     custom<SymbolVisibility>($sym_visibility)
     $sym_name
     `,` `target` `=` $target
+    (`,` `objects` `=` $objects^ )?
     attr-dict-with-keyword
     regions
   }];
@@ -1664,6 +1749,10 @@ def HAL_ExecutableVariantOp : HAL_Op<"executable.variant", [
 
   let extraClassDeclaration = [{
     Block& getBlock() { return getBody().front(); }
+
+    bool isExternal() {
+      return getBlock().getOps<::mlir::ModuleOp>().empty();
+    }
 
     ::mlir::ModuleOp getInnerModule() {
       auto moduleOps = getBlock().getOps<::mlir::ModuleOp>();
