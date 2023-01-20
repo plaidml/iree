@@ -125,6 +125,9 @@ option(IREE_COMPILER_BUILD_SHARED_LIBS "Enables BUILD_SHARED_LIBS CMake mode for
 # CI coverage is established.
 option(BUILD_SHARED_LIBS "Instructs CMake to build libraries as shared if possible" OFF)
 
+# Build IREE with TPP-MLIR repository
+option(IREE_BUILD_EXPERIMENTAL_TPP "Builds experimental TPP passes." OFF)
+
 #-------------------------------------------------------------------------------
 # IREE command-line tooling configuration
 #-------------------------------------------------------------------------------
@@ -177,6 +180,7 @@ endif()
 
 option(IREE_BUILD_EXPERIMENTAL_CPU_UKERNEL_PLUGINS "Build experimental plugins making builtin ukernels available to llvm-cpu modules compiled with --iree-llvmcpu-enable-microkernels" OFF)
 option(IREE_BUILD_EXPERIMENTAL_WEB_SAMPLES "Builds experimental web samples." OFF)
+option(IREE_BUILD_EXPERIMENTAL_TPP "Builds experimental TPP passes." OFF)
 
 #-------------------------------------------------------------------------------
 # CUDA Toolkit.
@@ -826,6 +830,12 @@ else()
   iree_llvm_add_external_project(mlir-hlo ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mlir-hlo)
   if(IREE_INPUT_TORCH)
     iree_llvm_add_external_project(torch-mlir-dialects ${CMAKE_CURRENT_SOURCE_DIR}/third_party/torch-mlir-dialects)
+  endif()
+
+  if(IREE_BUILD_EXPERIMENTAL_TPP)
+    # This is temporary to tell tpp-mlir it's been built inside IREE
+    set(TPP_INSIDE_IREE ON CACHE BOOL "" FORCE)
+    iree_llvm_add_external_project(mlir-tpp-dialects ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tpp-mlir)
   endif()
 
   # Ensure that LLVM-based dependencies needed for testing are included.

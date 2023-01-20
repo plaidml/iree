@@ -26,6 +26,11 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
+#include "mlir/Dialect/Bufferization/Transforms/Transforms.h"
+#include "TPP/Passes.h"
+
 #define DEBUG_TYPE "iree-llvm-cpu-lowering-pass-pipeline"
 
 namespace mlir {
@@ -603,6 +608,110 @@ void addCPUDataTilingPipeline(OpPassManager &passManager) {
   }
 }
 
+void addCPUTppXsmmPassPipeline(OpPassManager &passManager) {
+  OpPassManager &nestedModulePM = passManager.nest<ModuleOp>();
+  //nestedModulePM.addNestedPass<func::FuncOp>(
+  //    createConvertToDestinationPassingStylePass());
+  passManager.addPass(createTileAndDistributeToWorkgroupsPass());
+
+  // This is IREE's function for bufferization.
+  addBufferizePasses(nestedModulePM);
+  
+  #if 0
+  // ----------------- TPP bufferization passes: code taken from TPP repo
+  // Currently, fails because createOneShotBufferizePass is a module-level pass.
+  // Run bufferization as the rest of the passes prefer working on memref.
+  bufferization::OneShotBufferizationOptions buffOpts;
+  buffOpts.allowReturnAllocs = true;
+  buffOpts.bufferizeFunctionBoundaries = true;
+  buffOpts.functionBoundaryTypeConversion =
+      bufferization::LayoutMapOption::IdentityLayoutMap;
+  nestedModulePM.addNestedPass<func::FuncOp>(bufferization::createOneShotBufferizePass(buffOpts));
+  nestedModulePM.addNestedPass<func::FuncOp>(bufferization::createDropEquivalentBufferResultsPass());
+  nestedModulePM.addNestedPass<func::FuncOp>(
+      bufferization::createFinalizingBufferizePass());
+  // Clean up after bufferization.
+  nestedModulePM.addNestedPass<func::FuncOp>(bufferization::createBufferDeallocationPass());
+  nestedModulePM.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  #endif
+
+  // Run bufferization as the rest of the passes prefer working on memref.
+  //nestedModulePM.addNestedPass<func::FuncOp>(tpp::createBufferizePass());
+
+  //--------------------------------------------------------------------
+  //     TPP generation passes
+  //--------------------------------------------------------------------
+  // Convert generics to BRGEMM.
+  // The mapping is done after bufferization as the buffer semantics
+  // allow direct use of scf.parallel loops. This prevents different
+  // lowering outputs between input linalg on tensors and memrefs.
+  nestedModulePM.addNestedPass<func::FuncOp>(tpp::createMapToBatchReduceGEMMPass());
+
+  // Convert all higher level dialects to TPP.
+  nestedModulePM.addNestedPass<func::FuncOp>(tpp::createConvertLinalgToTppPass());
+  // Pass is restricted to module; cannot be invoked on a function
+  //passManager.addPass(tpp::createConvertVNNIToTppPass());
+
+  // Lower all TPP ops.
+  nestedModulePM.addNestedPass<func::FuncOp>(tpp::createConvertTppToXsmmPass());
+
+  // Lower all XSMM ops.
+  // Pass is restricted to module; cannot be invoked on a function
+  //nestedModulePM.addNestedPass<func::FuncOp>(tpp::createConvertXsmmToFuncPass());
+}
+
+void addCPUTppXsmmPassPipeline(OpPassManager &passManager) {
+  // This is needed because this pass adds workgroup attribute to lowering config,
+  // which is needed for downstream IREE passes. Otherwise, TPP passes dont need it.
+  passManager.addPass(createTileAndDistributeToWorkgroupsPass());
+
+  OpPassManager &nestedModulePM = passManager.nest<ModuleOp>();
+
+  bool linalgToLoops = false;
+  bool tppToLoops = false;
+
+  // Run transforms first and clean them up afterwards.
+  nestedModulePM.addPass(tpp::createTransformPass());
+  nestedModulePM.addNestedPass<func::FuncOp>(tpp::createCleanupPass());
+
+  // TODO: Add here propagation, constant fold and blocking.
+  if (linalgToLoops) {
+    // Lower linalg directly to loops.
+    // Skip all TPP transformations.
+    nestedModulePM.addPass(tpp::createBufferizePass());
+    nestedModulePM.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
+    nestedModulePM.addNestedPass<func::FuncOp>(tpp::createCleanupPass());
+  } else {
+    // Lower IR through TPP operations.
+    // Transform operations to be TPP compatible.
+    nestedModulePM.addPass(tpp::createTppMappingPass());
+    nestedModulePM.addNestedPass<func::FuncOp>(tpp::createCleanupPass());
+
+    // Using IREE's bufferization.
+    addBufferizePasses(nestedModulePM);
+
+    // Convert generics to BRGEMM.
+    // The mapping is done after bufferization as the buffer semantics
+    // allow direct use of scf.parallel loops. This prevents different
+    // lowering outputs between input linalg on tensors and memrefs.
+    nestedModulePM.addNestedPass<func::FuncOp>(tpp::createRewriteToBatchReduceGemmPass());
+
+    // Lower operations to TPP.
+    nestedModulePM.addNestedPass<func::FuncOp>(tpp::createTppConversionPass());
+    nestedModulePM.addNestedPass<func::FuncOp>(tpp::createCleanupPass());
+
+    // Lower all TPP operations.
+    nestedModulePM.addNestedPass<func::FuncOp>(tpp::createTppLoweringPass(tppToLoops));
+    nestedModulePM.addNestedPass<func::FuncOp>(tpp::createCleanupPass());
+  }
+
+  // Covert all local TPP-related dialects.
+  nestedModulePM.addPass(tpp::createLocalDialectsLoweringPass());
+
+  // Clean up after the default pipeline.
+  nestedModulePM.addNestedPass<func::FuncOp>(tpp::createPostprocessingPass());
+}
+
 void addCPUDefaultPassPipeline(OpPassManager &passManager) {
   addTileAndDistributePasses(passManager);
   OpPassManager &nestedModulePM = passManager.nest<ModuleOp>();
@@ -626,6 +735,9 @@ void addTransformDialectPasses(OpPassManager &passManager) {
 static void addLowerToLLVMPasses(OpPassManager &passManager) {
   // Lower `ukernel.*` ops to function calls
   passManager.addPass(createLowerUKernelOpsToCallsPass());
+  
+  // Lower XSMM calls to functions.
+  // passManager.addPass(tpp::createConvertXsmmToFuncPass());
 
   // LinalgExt -> SCF
   passManager.addNestedPass<func::FuncOp>(

@@ -156,6 +156,11 @@ void addTransformDialectPasses(OpPassManager &passManager);
 /// suitable for library call dispatch and lowering to loops.
 void addVMVXDefaultPassPipeline(OpPassManager &passManager,
                                 bool enableMicrokernels);
+
+/// Populates the passes needed to lower linalg ops on tensors to TPP ops
+/// and then to XSMM function calls.
+void addCPUTppXsmmPassPipeline(OpPassManager &passManager);
+
 // Populates the passes needed to do tiling, decomposing, and vectorizing the
 // convolution ops.
 LogicalResult verifyConvTileAndDecomposeExpertConfig(

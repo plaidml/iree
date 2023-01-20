@@ -47,6 +47,7 @@ iree_cc_library(
     "VectorContractCustomKernels.cpp"
     "VerifyLinalgTransformLegality.cpp"
   DEPS
+    MLIRTPP
     IREELinalgExtDialect
     IREELinalgExtPasses
     IREELinalgTransformDialect
