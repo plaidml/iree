@@ -44,3 +44,6 @@
 [submodule "third_party/musl"]
 	path = third_party/musl
 	url = https://github.com/powderluv/musl.git
+[submodule "third_party/tpp-mlir"]
+	path = third_party/tpp-mlir
+	url = https://github.com/plaidml/tpp-mlir.git
