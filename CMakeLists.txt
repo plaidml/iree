@@ -166,6 +166,7 @@ endif()
 
 option(IREE_BUILD_EXPERIMENTAL_VMVX_MMT4D "Enables MMT4D methods in the VMVX module." OFF)
 option(IREE_BUILD_EXPERIMENTAL_WEB_SAMPLES "Builds experimental web samples." OFF)
+option(IREE_BUILD_EXPERIMENTAL_TPP "Builds experimental TPP passes." OFF)
 
 #-------------------------------------------------------------------------------
 # CUDA Toolkit.
