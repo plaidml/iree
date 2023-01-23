@@ -9,6 +9,7 @@
 #include "iree-dialects/Dialect/LinalgTransform/SimplePatternRewriter.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
+#include "mlir/Conversion/VectorToGPU/VectorToGPU.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
@@ -58,7 +59,7 @@ void transform_dialect::MapNestedForeachThreadToGpuThreadsOp::build(
 // TODO: synchronizations for imperfectly nested stuff.
 DiagnosedSilenceableFailure
 transform_dialect::MapNestedForeachThreadToGpuThreadsOp::applyToOne(
-    func::FuncOp target, SmallVectorImpl<Operation *> &results,
+    func::FuncOp target, transform::ApplyToEachResultList &results,
     transform::TransformState &state) {
   if (!isa<HAL::ExecutableOp, HAL::ExecutableVariantOp>(state.getTopLevel())) {
     state.getTopLevel()->emitOpError(
@@ -100,7 +101,7 @@ transform_dialect::MapNestedForeachThreadToGpuThreadsOp::applyToOne(
     // TODO: should really be: exportOp.setWorkgroupSizeAttr(newAttr);
     exportOp->setAttr(exportOp.getWorkgroupSizeAttrName(), newAttr);
   }
-  results.assign({target});
+  results.push_back(target);
   return diag;
 }
 
@@ -267,7 +268,7 @@ static HAL::ExecutableExportOp getExecutableExportOpForFunc(
 
 DiagnosedSilenceableFailure
 transform_dialect::VectorToWarpExecuteOnLane0Op::applyToOne(
-    scf::IfOp target, SmallVectorImpl<Operation *> &results,
+    scf::IfOp target, transform::ApplyToEachResultList &results,
     transform::TransformState &state) {
   if (!isa<HAL::ExecutableOp, HAL::ExecutableVariantOp>(state.getTopLevel())) {
     results.assign(1, nullptr);
@@ -322,7 +323,7 @@ transform_dialect::VectorToWarpExecuteOnLane0Op::applyToOne(
            << "scf::ifOp needs to be predicated on threadIdx.x == 0 --- the "
               "transform is not applied";
   }
-  results.assign({vectorDistributionResult->warpOp});
+  results.push_back(vectorDistributionResult->warpOp);
   return DiagnosedSilenceableFailure::success();
 }
 
@@ -341,13 +342,15 @@ static Value allocateGlobalSharedMemory(Location loc, OpBuilder &builder,
                                         vector::WarpExecuteOnLane0Op warpOp,
                                         Type type) {
   MemRefType memrefType;
+  auto addressSpaceAttr = gpu::AddressSpaceAttr::get(
+      builder.getContext(), gpu::GPUDialect::getWorkgroupAddressSpace());
   if (auto vectorType = type.dyn_cast<VectorType>()) {
     memrefType =
-        MemRefType::get(vectorType.getShape(), vectorType.getElementType(), {},
-                        gpu::GPUDialect::getWorkgroupAddressSpace());
+        MemRefType::get(vectorType.getShape(), vectorType.getElementType(),
+                        MemRefLayoutAttrInterface{}, addressSpaceAttr);
   } else {
-    memrefType = MemRefType::get({1}, type, {},
-                                 gpu::GPUDialect::getWorkgroupAddressSpace());
+    memrefType = MemRefType::get({1}, type, MemRefLayoutAttrInterface{},
+                                 addressSpaceAttr);
   }
   return builder.create<memref::AllocOp>(loc, memrefType);
 }
@@ -452,8 +455,11 @@ struct HoistSharedMemoryAlloc : public OpRewritePattern<memref::AllocOp> {
   using OpRewritePattern<memref::AllocOp>::OpRewritePattern;
   LogicalResult matchAndRewrite(memref::AllocOp alloc,
                                 PatternRewriter &rewriter) const override {
-    if (alloc.getType().getMemorySpaceAsInt() !=
-            gpu::GPUDialect::getWorkgroupAddressSpace() ||
+    auto addressSpaceAttr =
+        alloc.getType().getMemorySpace().dyn_cast<gpu::AddressSpaceAttr>();
+    if (!(addressSpaceAttr &&
+          addressSpaceAttr.getValue() !=
+              gpu::GPUDialect::getWorkgroupAddressSpace()) ||
         alloc.getNumOperands() != 0)
       return failure();
     auto warpParent = alloc->getParentOfType<vector::WarpExecuteOnLane0Op>();
@@ -549,7 +555,7 @@ static void populateWarpExecuteOnLane0ToScf(
 
 DiagnosedSilenceableFailure
 transform_dialect::VectorWarpDistributionOp::applyToOne(
-    Operation *target, SmallVectorImpl<Operation *> &results,
+    Operation *target, transform::ApplyToEachResultList &results,
     transform::TransformState &state) {
   if (!target->hasTrait<OpTrait::IsIsolatedFromAbove>()) {
     target->emitOpError(
@@ -588,6 +594,35 @@ transform_dialect::VectorWarpDistributionOp::applyToOne(
 }
 
 void transform_dialect::VectorWarpDistributionOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  transform::onlyReadsHandle(getTarget(), effects);
+  transform::modifiesPayload(effects);
+}
+
+DiagnosedSilenceableFailure
+transform_dialect::VectorToMMAConversionOp::applyToOne(
+    Operation *target, transform::ApplyToEachResultList &results,
+    transform::TransformState &state) {
+  if (!target->hasTrait<OpTrait::IsIsolatedFromAbove>()) {
+    target->emitOpError(
+        "applies only to isolated-from-above targets because it needs to apply "
+        "patterns greedily");
+    return emitDefaultDefiniteFailure(target);
+  }
+  MLIRContext *ctx = target->getContext();
+  RewritePatternSet patterns(ctx);
+  mlir::vector::populateCastAwayVectorLeadingOneDimPatterns(patterns);
+  populatePrepareVectorToMMAPatterns(patterns, /*llvmgpuUseMMASync=*/false);
+  if (failed(applyPatternsAndFoldGreedily(target, std::move(patterns)))) {
+    target->emitOpError("vector to mma patterns failed to apply");
+    return emitDefaultDefiniteFailure(target);
+  }
+  convertVectorToMMAOps(target);
+
+  return DiagnosedSilenceableFailure::success();
+}
+
+void transform_dialect::VectorToMMAConversionOp::getEffects(
     SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
   transform::onlyReadsHandle(getTarget(), effects);
   transform::modifiesPayload(effects);

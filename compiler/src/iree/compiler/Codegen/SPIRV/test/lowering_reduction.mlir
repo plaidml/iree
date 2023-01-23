@@ -72,15 +72,16 @@ hal.executable @warp_reduction_dispatch {
 //         CHECK:    %[[R5:.+]] = arith.addf %[[R4]], %[[S3]] : f32
 //         CHECK:    %[[S4:.+]], %{{.*}} = gpu.shuffle  xor %[[R5]], %[[C16]], %[[C32]] : f32
 //         CHECK:    %[[R6:.+]] = arith.addf %[[R5]], %[[S4]] : f32
-//         CHECK:    %[[ALLOC:.+]] = memref.alloc() : memref<4xf32, 3>
+//         CHECK:    %[[ALLOC:.+]] = memref.alloc() : memref<4xf32, #gpu.address_space<workgroup>>
 //         CHECK:    %[[WID:.+]] = arith.divui %{{.*}}, %{{.*}} : index
 //         CHECK:    %[[LANE_ID:.*]] = arith.remui %[[TID]], %[[C32I]] : index
 //         CHECK:    %[[LANE0:.*]] = arith.cmpi eq, %[[LANE_ID]], %[[C0]] : index
 //         CHECK:    scf.if %[[LANE0]] { 
-//         CHECK:      memref.store %[[R6]], %[[ALLOC]][%[[WID]]] : memref<4xf32, 3>
+//         CHECK:      memref.store %[[R6]], %[[ALLOC]][%[[WID]]] : memref<4xf32, #gpu.address_space<workgroup>>
 //         CHECK:    }
 //         CHECK:    gpu.barrier
-//         CHECK:    %[[LOAD_VAL:.+]] = memref.load %[[ALLOC]][%[[LANE_ID]]] : memref<4xf32, 3>
+//         CHECK:    %[[LANE_ID_IN_BOUNDS:.*]] = arith.minui %[[LANE_ID]]
+//         CHECK:    %[[LOAD_VAL:.+]] = memref.load %[[ALLOC]][%[[LANE_ID_IN_BOUNDS]]] : memref<4xf32, #gpu.address_space<workgroup>>
 //         CHECK:    %[[S5:.+]], %{{.*}} = gpu.shuffle  xor %[[LOAD_VAL]], %[[C1]], %[[C32]] : f32
 //         CHECK:    %[[R7:.+]] = arith.addf %[[LOAD_VAL]], %[[S5]] : f32
 //         CHECK:    %[[S6:.+]], %{{.*}} = gpu.shuffle  xor %[[R7]], %[[C2]], %[[C32]] : f32
@@ -182,5 +183,5 @@ hal.executable @warp_reduction_dispatch {
 //         CHECK:      %[[SLICE2:.+]] = vector.extract_strided_slice %[[READ]] {offsets = [4], sizes = [4], strides = [1]}
 //         CHECK:      %[[DIV1:.+]] = arith.divf %[[SLICE2]], %[[SPLAT]] : vector<4xf16>
 //         CHECK:      %[[SLICE3:.+]] = vector.insert_strided_slice %[[DIV1]], %[[SLICE1]] {offsets = [4], strides = [1]}
-//         CHECK:      vector.transfer_write %[[SLICE3]], %[[SPAN1]][%[[WGIDY]], %[[WGIDX]], %56] {in_bounds = [true]} : vector<8xf16>, memref<10x9216x9216xf16{{.*}}>
+//         CHECK:      vector.transfer_write %[[SLICE3]], %[[SPAN1]][%[[WGIDY]], %[[WGIDX]], %{{.*}}] {in_bounds = [true]} : vector<8xf16>, memref<10x9216x9216xf16{{.*}}>
 //         CHECK:    }

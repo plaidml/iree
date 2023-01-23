@@ -31,12 +31,14 @@ iree_runtime_cc_library(
     srcs = [
         "mmt4d_arch.c",
         "pack_arch.c",
+        "query_tile_sizes_arch.c",
     ],
     hdrs = [
         "mmt4d_arch.h",
         "pack_arch.h",
+        "query_tile_sizes_arch.h",
     ],
     deps = [
-        "//runtime/src/iree/builtins/ukernel:common",
+        "//runtime/src/iree/builtins/ukernel:headers",
     ],
 )

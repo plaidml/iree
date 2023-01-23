@@ -78,18 +78,18 @@ jobs:
       - name: "Building mmperf for CPU"
         run: |
           ./build_tools/github_actions/docker_run.sh \
-            gcr.io/iree-oss/mmperf@sha256:70b58da77cd09b5e7bdddc3245c4b7bdf58758bc91712423f5a4651d3b3fc0d4 \
+            gcr.io/iree-oss/mmperf@sha256:f32657e5b9e9bf54614209517f9c895f4fb2280d1a7c1a3a9b7fb702327db8c6 \
           ./build_tools/benchmarks/mmperf/build_mmperf.sh "${BUILD_DIR}" "cpu" "${IREE_SHA}"
       - name: "Running mmperf on CPU"
         run: |
           mkdir ${RESULTS_DIR}
           ./build_tools/github_actions/docker_run.sh \
-            gcr.io/iree-oss/mmperf@sha256:70b58da77cd09b5e7bdddc3245c4b7bdf58758bc91712423f5a4651d3b3fc0d4 \
+            gcr.io/iree-oss/mmperf@sha256:f32657e5b9e9bf54614209517f9c895f4fb2280d1a7c1a3a9b7fb702327db8c6 \
           ./build_tools/benchmarks/mmperf/run_mmperf.sh "${BUILD_DIR}" "${RESULTS_DIR}"
       - name: "Uploading results"
         run: |
-          gcloud alpha storage cp "${RESULTS_DIR}/latest/**" "${GCS_UPLOAD_PARENT_DIR}/${GCS_UPLOAD_DIR_NAME}/"
-          gcloud alpha storage cp "${RESULTS_DIR}/latest/matmul.png" "${GCS_UPLOAD_PARENT_DIR}/matmul.png"
+          gcloud storage cp "${RESULTS_DIR}/latest/**" "${GCS_UPLOAD_PARENT_DIR}/${GCS_UPLOAD_DIR_NAME}/"
+          gcloud storage cp "${RESULTS_DIR}/latest/matmul.png" "${GCS_UPLOAD_PARENT_DIR}/matmul.png"
 
   build_cuda:
     needs: setup
@@ -113,7 +113,7 @@ jobs:
       - name: "Building mmperf for CUDA"
         run: |
           ./build_tools/github_actions/docker_run.sh \
-            gcr.io/iree-oss/mmperf@sha256:70b58da77cd09b5e7bdddc3245c4b7bdf58758bc91712423f5a4651d3b3fc0d4 \
+            gcr.io/iree-oss/mmperf@sha256:f32657e5b9e9bf54614209517f9c895f4fb2280d1a7c1a3a9b7fb702327db8c6 \
           ./build_tools/benchmarks/mmperf/build_mmperf.sh "${BUILD_DIR}" "cuda" "${IREE_SHA}"
       - name: "Removing unused files"
         run: |
@@ -134,7 +134,7 @@ jobs:
           BUILD_DIR_ARCHIVE: ${{ steps.archive.outputs.build-dir-archive }}
           BUILD_DIR_GCS_ARTIFACT: ${{ env.GCS_DIR }}/${{ steps.archive.outputs.build-dir-archive }}
         run: |
-          gcloud alpha storage cp "${BUILD_DIR_ARCHIVE}" "${BUILD_DIR_GCS_ARTIFACT}"
+          gcloud storage cp "${BUILD_DIR_ARCHIVE}" "${BUILD_DIR_GCS_ARTIFACT}"
           echo "build-dir-gcs-artifact=${BUILD_DIR_GCS_ARTIFACT}" >> "${GITHUB_OUTPUT}"
 
   benchmark_cuda:
@@ -157,7 +157,7 @@ jobs:
       - name: "Checking out repository"
         uses: actions/checkout@e2f20e631ae6d7dd3b768f56a5d2af784dd54791 # v2.5.0
       - name: "Downloading build dir archive"
-        run: gcloud alpha storage cp "${BUILD_DIR_GCS_ARTIFACT}" "${BUILD_DIR_ARCHIVE}"
+        run: gcloud storage cp "${BUILD_DIR_GCS_ARTIFACT}" "${BUILD_DIR_ARCHIVE}"
       - name: "Extracting build dir archive"
         run: tar -xf "${BUILD_DIR_ARCHIVE}"
       - name: "Running mmperf on CUDA"
@@ -165,10 +165,10 @@ jobs:
           mkdir ${RESULTS_DIR}
           ./build_tools/github_actions/docker_run.sh \
           --gpus all \
-            gcr.io/iree-oss/mmperf@sha256:70b58da77cd09b5e7bdddc3245c4b7bdf58758bc91712423f5a4651d3b3fc0d4 \
+            gcr.io/iree-oss/mmperf@sha256:f32657e5b9e9bf54614209517f9c895f4fb2280d1a7c1a3a9b7fb702327db8c6 \
           ./build_tools/benchmarks/mmperf/run_mmperf.sh "${BUILD_DIR}" "${RESULTS_DIR}"
       - name: "Uploading results"
         run: |
           export GCS_DIR_NAME="$(date +'%Y-%m-%d').$(date +'%s')"
-          gcloud alpha storage cp "${RESULTS_DIR}/latest/**" "${GCS_UPLOAD_PARENT_DIR}/${GCS_UPLOAD_DIR_NAME}/"
-          gcloud alpha storage cp "${RESULTS_DIR}/latest/matmul.png" "${GCS_UPLOAD_PARENT_DIR}/matmul.png"
+          gcloud storage cp "${RESULTS_DIR}/latest/**" "${GCS_UPLOAD_PARENT_DIR}/${GCS_UPLOAD_DIR_NAME}/"
+          gcloud storage cp "${RESULTS_DIR}/latest/matmul.png" "${GCS_UPLOAD_PARENT_DIR}/matmul.png"

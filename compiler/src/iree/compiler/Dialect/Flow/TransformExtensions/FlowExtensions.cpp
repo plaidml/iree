@@ -14,8 +14,8 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "mlir/IR/BlockAndValueMapping.h"
 #include "mlir/IR/Dominance.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "mlir/Transforms/TopologicalSortUtils.h"
 
@@ -86,7 +86,7 @@ static void rewriteParallelInsertSlices(
     PatternRewriter &rewriter, scf::ForeachThreadOp foreachThreadOp,
     scf::PerformConcurrentlyOp performConcurrentlyOp, Block &block,
     ValueRange resultTensorOperands, ValueRange resultTensorsDynamicDims,
-    BlockAndValueMapping tensorToFlowBvm) {
+    IRMapping tensorToFlowBvm) {
   Location loc = performConcurrentlyOp.getLoc();
   int64_t resultIndex = 0;
   for (const Operation &yieldingOp :
@@ -117,14 +117,14 @@ static void rewriteParallelInsertSlices(
 
 /// Rewrite ExtractSlice ops in `dispatchOp` as Flow::DispatchTensorLoadOps.
 /// Takes a list of all tensor and all tensorDynamicDims operands to the
-/// dispatchOp as well as a BlockAndValueMapping from tensor operands to the
+/// dispatchOp as well as a IRMapping from tensor operands to the
 /// corresponding Flow dispatch tensor bbArgs.
 static void rewriteExtractSlices(PatternRewriter &rewriter,
                                  scf::ForeachThreadOp foreachThreadOp,
                                  Flow::DispatchWorkgroupsOp dispatchOp,
                                  ValueRange tensorOperands,
                                  ValueRange tensorDynamicDims,
-                                 BlockAndValueMapping tensorToFlowBvm) {
+                                 IRMapping tensorToFlowBvm) {
   dispatchOp->walk([&](tensor::ExtractSliceOp extractSliceOp) {
     Value source = extractSliceOp.getSource();
     if (auto sourceBbArg = source.dyn_cast<BlockArgument>())
@@ -392,7 +392,7 @@ rewriteForeachThreadToFlowDispatchWorkgroups(
   // insert an explicit Flow::DispatchTensorLoadOp to get back a proper
   // tensor. Save the tensor operand -> flow tensor bbArg mapping in
   // `tensorToFlowBvm`.
-  BlockAndValueMapping bvm, tensorToFlowBvm;
+  IRMapping bvm, tensorToFlowBvm;
   auto flowBbArgs = block->getArguments().slice(
       sizeNonTensors, sizeNonResultTensors + sizeResultTensors);
   tensorToFlowBvm.map(allTensorOperands, flowBbArgs);
@@ -460,7 +460,7 @@ rewriteForeachThreadToFlowDispatchWorkgroups(
 
 DiagnosedSilenceableFailure
 transform_dialect::ForeachThreadToFlowDispatchWorkgroupsOp::applyToOne(
-    scf::ForeachThreadOp target, SmallVectorImpl<Operation *> &results,
+    scf::ForeachThreadOp target, transform::ApplyToEachResultList &results,
     transform::TransformState &) {
   SimplePatternRewriter rewriter(target->getContext());
   FailureOr<Flow::DispatchWorkgroupsOp> result =
@@ -478,7 +478,7 @@ void transform_dialect::ForeachThreadToFlowDispatchWorkgroupsOp::getEffects(
 }
 
 DiagnosedSilenceableFailure transform_dialect::RegionToWorkgroupsOp::applyToOne(
-    Flow::DispatchRegionOp target, SmallVectorImpl<Operation *> &results,
+    Flow::DispatchRegionOp target, transform::ApplyToEachResultList &results,
     transform::TransformState &) {
   IRRewriter rewriter(target->getContext());
   FailureOr<Flow::DispatchWorkgroupsOp> result =
@@ -827,7 +827,7 @@ void transform_dialect::MoveSucceedingOpIntoDispatchRegionOp::getEffects(
 
 DiagnosedSilenceableFailure
 transform_dialect::WrapInDispatchRegionOp::applyToOne(
-    Operation *target, SmallVectorImpl<Operation *> &results,
+    Operation *target, transform::ApplyToEachResultList &results,
     transform::TransformState &state) {
   IRRewriter rewriter(target->getContext());
   Optional<Flow::WorkloadBuilder> workloadBuilder = std::nullopt;

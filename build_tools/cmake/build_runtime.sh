@@ -25,8 +25,10 @@ declare -a args
 args=(
   "-G" "Ninja"
   "-B" "${BUILD_DIR}"
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DIREE_BUILD_COMPILER=OFF
+  "-DPython3_EXECUTABLE=${IREE_PYTHON3_EXECUTABLE}"
+  "-DPYTHON_EXECUTABLE=${IREE_PYTHON3_EXECUTABLE}"
+  "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
+  "-DIREE_BUILD_COMPILER=OFF"
 )
 
 case "${BUILD_PRESET}" in
@@ -74,6 +76,6 @@ case "${BUILD_PRESET}" in
     ;;
 esac
 
-if (( IREE_READ_REMOTE_CCACHE == 1 )); then
+if (( IREE_USE_CCACHE == 1 )); then
   ccache --show-stats
 fi

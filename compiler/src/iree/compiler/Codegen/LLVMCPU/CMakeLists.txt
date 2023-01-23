@@ -19,13 +19,14 @@ iree_cc_library(
   SRCS
     "ConvertToLLVM.cpp"
     "KernelDispatch.cpp"
-    "LLVMCPUAArch64VectorLowering.cpp"
     "LLVMCPUAssignConstantOrdinals.cpp"
     "LLVMCPUAssignImportOrdinals.cpp"
     "LLVMCPUCheckIRBeforeLLVMConversion.cpp"
     "LLVMCPUEmitVectorizationRemarks.cpp"
     "LLVMCPULinkExecutables.cpp"
     "LLVMCPULowerExecutableTarget.cpp"
+    "LLVMCPUMaterializeEncodingPass.cpp"
+    "LLVMCPUMmt4dVectorLowering.cpp"
     "LLVMCPUSynchronizeSymbolVisibility.cpp"
     "LLVMCPUUnfuseFMAOps.cpp"
     "Passes.cpp"
@@ -38,6 +39,7 @@ iree_cc_library(
     IREELinalgTransformDialect
     IREELinalgTransformDialectPasses
     LLVMSupport
+    MLIRAffineDialect
     MLIRAffineToStandard
     MLIRAnalysis
     MLIRArithDialect
@@ -81,11 +83,12 @@ iree_cc_library(
     MLIRVectorToSCF
     MLIRVectorTransforms
     iree::compiler::Codegen::Common
-    iree::compiler::Codegen::Common::TransformDialectInterpreterPass
+    iree::compiler::Codegen::Common::CommonPasses
     iree::compiler::Codegen::Dialect::IREECodegenDialect
     iree::compiler::Codegen::Interfaces::PartitionableLoopsInterface
     iree::compiler::Codegen::PassHeaders
     iree::compiler::Codegen::Sandbox
+    iree::compiler::Codegen::TransformDialectStrategies::CPU::TransformDialectStrategies
     iree::compiler::Codegen::Transforms
     iree::compiler::Codegen::Utils
     iree::compiler::Codegen::VMVX

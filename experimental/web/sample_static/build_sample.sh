@@ -35,6 +35,7 @@ BUILD_DIR="${IREE_EMPSCRIPTEN_BUILD_DIR:-build-emscripten}"
 INSTALL_ROOT="$(realpath ${1:-${HOST_BUILD_DIR}/install})"
 SOURCE_DIR="${ROOT_DIR}/experimental/web/sample_static"
 BINARY_DIR="${BUILD_DIR}/experimental/web/sample_static/"
+IREE_PYTHON3_EXECUTABLE="${IREE_PYTHON3_EXECUTABLE:-$(which python3)}"
 
 
 ###############################################################################
@@ -88,8 +89,10 @@ echo "=== Building web artifacts using Emscripten ==="
 emcmake "${CMAKE_BIN}" \
   -G Ninja \
   -B "${BUILD_DIR}" \
+  -DPython3_EXECUTABLE="${IREE_PYTHON3_EXECUTABLE}" \
+  -DPYTHON_EXECUTABLE="${IREE_PYTHON3_EXECUTABLE}" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DIREE_HOST_BINARY_ROOT="${INSTALL_ROOT}" \
+  -DIREE_HOST_BIN_DIR="${INSTALL_ROOT}/bin" \
   -DIREE_BUILD_EXPERIMENTAL_WEB_SAMPLES=ON \
   -DIREE_HAL_DRIVER_DEFAULTS=OFF \
   -DIREE_HAL_DRIVER_LOCAL_SYNC=ON \

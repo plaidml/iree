@@ -45,14 +45,6 @@ iree_compiler_cc_library(
     name = "TransformDialectInterpreterPass",
     srcs = [
         "TransformDialectInterpreterPass.cpp",
-        "TransformDialectStrategies.cpp",
-        "TransformDialectStrategiesCPU.cpp",
-        "TransformDialectStrategiesGPU.cpp",
-    ],
-    hdrs = [
-        "TransformDialectStrategies.h",
-        "TransformDialectStrategiesCPU.h",
-        "TransformDialectStrategiesGPU.h",
     ],
     deps = [
         # Dialects
@@ -81,7 +73,6 @@ iree_compiler_cc_library(
         # IR
         "@llvm-project//mlir:Analysis",
         "@llvm-project//mlir:IR",
-        "@llvm-project//mlir:Parser",
         "@llvm-project//mlir:Pass",
         "@llvm-project//mlir:Rewrite",
         # Interfaces
@@ -93,16 +84,24 @@ iree_compiler_cc_library(
         "@llvm-project//mlir:VectorTransforms",
         # Other Stuff
         "//compiler/src/iree/compiler/Codegen:PassHeaders",
+        "//compiler/src/iree/compiler/Utils",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:DialectUtils",
-        # TransformExtensions
+        # TransformDialectStrategies
+        "//compiler/src/iree/compiler/Codegen/TransformDialectStrategies/Common:TransformDialectStrategies",
+        # TransformExtensions (needed for registration in the pass)
         "//llvm-external-projects/iree-dialects:IREEDialectsTransforms",
         "//compiler/src/iree/compiler/Codegen/Common/TransformExtensions:CommonExtensions",
         "//compiler/src/iree/compiler/Dialect/Flow/TransformExtensions:FlowExtensions",
         "//compiler/src/iree/compiler/Codegen/LLVMCPU/TransformExtensions:LLVMCPUExtensions",
         "//compiler/src/iree/compiler/Codegen/LLVMGPU/TransformExtensions:LLVMGPUExtensions",
+        "@llvm-project//mlir:AffineTransformOps",
+        "@llvm-project//mlir:GPUTransformOps",
         "@llvm-project//mlir:LinalgTransformOps",
+        "@llvm-project//mlir:MemRefTransformOps",
+        "@llvm-project//mlir:SCFTransformOps",
+        "@llvm-project//mlir:VectorTransformOps",
     ],
 )
 
@@ -120,9 +119,10 @@ iree_compiler_cc_library(
         "ForOpCanonicalizationPass.cpp",
         "FuseTensorPadWithConsumer.cpp",
         "IREEComprehensiveBufferizePass.cpp",
-        "MaterializeEncodingPass.cpp",
+        "MaterializeEncodingIntoPackUnPack.cpp",
         "OptimizeVectorTransferPass.cpp",
         "PolynomialApproximationPass.cpp",
+        "RematerializeParallelOps.cpp",
         "SplitFullPartialTransferPass.cpp",
         "TestPartitionableLoopsInterface.cpp",
         "TileAndDistributeToWorkgroupsPass.cpp",
@@ -132,6 +132,7 @@ iree_compiler_cc_library(
     ],
     hdrs = [
         "BufferizationAnalysis.h",
+        "EncodingInfo.h",
         "Transforms.h",
     ],
     deps = [
@@ -150,6 +151,7 @@ iree_compiler_cc_library(
         "//llvm-external-projects/iree-dialects:IREELinalgExtDialect",
         "//llvm-external-projects/iree-dialects:IREELinalgExtPasses",
         "//llvm-external-projects/iree-dialects:IREELinalgExtTransforms",
+        "//runtime/src/iree/builtins/ukernel:exported_bits",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:AffineDialect",
         "@llvm-project//mlir:AffineUtils",
@@ -216,7 +218,6 @@ iree_compiler_cc_library(
     hdrs = [
         "GPUPatterns.h",
         "LinalgOpInfo.h",
-        "TransformDialectStrategies.h",
         "UserConfig.h",
     ],
     deps = [

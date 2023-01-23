@@ -40,9 +40,9 @@ iree_compiler_cc_library(
     deps = [
         "//compiler/src/iree/compiler/Codegen:PassHeaders",
         "//compiler/src/iree/compiler/Codegen/Common",
-        "//compiler/src/iree/compiler/Codegen/Common:TransformDialectInterpreterPass",
         "//compiler/src/iree/compiler/Codegen/Dialect:IREECodegenDialect",
         "//compiler/src/iree/compiler/Codegen/LLVMGPU/TransformExtensions:LLVMGPUExtensions",
+        "//compiler/src/iree/compiler/Codegen/TransformDialectStrategies/GPU:TransformDialectStrategies",
         "//compiler/src/iree/compiler/Codegen/Transforms",
         "//compiler/src/iree/compiler/Codegen/Utils",
         "//compiler/src/iree/compiler/Dialect/Flow/IR",
@@ -82,6 +82,7 @@ iree_compiler_cc_library(
         "@llvm-project//mlir:NVGPUDialect",
         "@llvm-project//mlir:NVGPUToNVVM",
         "@llvm-project//mlir:NVGPUTransforms",
+        "@llvm-project//mlir:NVGPUUtils",
         "@llvm-project//mlir:NVVMDialect",
         "@llvm-project//mlir:PDLDialect",
         "@llvm-project//mlir:PDLInterpDialect",

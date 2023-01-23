@@ -13,7 +13,7 @@
 # mmperf repo. Later versions of Clang, LLVM, Python and Ubuntu are needed
 # to satisfy the dependency requirements of the backends.
 
-FROM gcr.io/iree-oss/perf@sha256:d9ba4befb943c11671747a76bee8f9afd286d88254e9f5c9da905b00bd2a8404
+FROM gcr.io/iree-oss/perf@sha256:8f4dfc8cf779f6499215a5c4ff2c7608ac3329f23f6ddcf6025e1868e1584222
 
 ######## CUDA ########
 RUN apt-get update \

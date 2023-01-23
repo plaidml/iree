@@ -41,9 +41,7 @@ struct AllDimsExcept {
   explicit AllDimsExcept(std::initializer_list<int64_t> range) {
     llvm::append_range(exceptions, range);
   }
-  ArrayRef<int64_t> getExcluded() const {
-    return llvm::makeArrayRef(exceptions);
-  }
+  ArrayRef<int64_t> getExcluded() const { return llvm::ArrayRef(exceptions); }
 
 private:
   SmallVector<int64_t> exceptions;
@@ -67,8 +65,18 @@ struct CaptureDim : public CaptureStaticValue<int64_t> {
   using Base::Base;
 };
 
+/// Captures the (static) sizes of multiple dimensions.
+struct CaptureDims : public CaptureStaticValue<SmallVector<int64_t>> {
+  using Base::Base;
+};
+
 /// Captures the rank of the operation.
 struct CaptureRank : public CaptureStaticValue<int64_t> {
+  using Base::Base;
+};
+
+/// Captures the bitwidth of an element type.
+struct CaptureElementTypeBitWidth : public CaptureStaticValue<int64_t> {
   using Base::Base;
 };
 
@@ -128,13 +136,6 @@ struct OptionalMatch : public SingleValuePredicateParam<bool> {
 /// Predicate tag indicating that the reduction is produced by a single combiner
 /// operation.
 struct SingleCombinerReduction {};
-
-/// Indicates that it suffices for only a subset of an operand or result value
-/// to be used.
-struct SubsetOf {
-  explicit SubsetOf(StructuredOpMatcher &matcher) : matcher(matcher) {}
-  StructuredOpMatcher &matcher;
-};
 
 namespace detail {
 template <typename T>
@@ -238,9 +239,9 @@ public:
   //===-------------------------------------------------------------------===//
   // Capture directives.
   //===-------------------------------------------------------------------===//
-  StructuredOpMatcher &rank(CaptureStaticValue<int64_t> capture);
-  StructuredOpMatcher &dim(int64_t dimension,
-                           CaptureStaticValue<int64_t> capture);
+  StructuredOpMatcher &rank(CaptureRank capture);
+  StructuredOpMatcher &dim(int64_t dimension, CaptureDim capture);
+  StructuredOpMatcher &dim(AllDims tag, CaptureDims captures);
 
   //===-------------------------------------------------------------------===//
   // Constraints on input operands.
@@ -278,10 +279,13 @@ public:
   /// have a projected permutation indexing map.
   StructuredOpMatcher &input(AllOperands tag, IsProjectedPermutation);
 
-  /// Adds a predicate that recursively applies another predicate to the
-  /// operation defining the `position`-th input operand, looking through any
-  /// "subsetting" operation such as "tensor.extract_slice".
-  StructuredOpMatcher &input(int64_t position, SubsetOf subset);
+  /// Adds a predicate checking that the bit width of the elemental type of the
+  /// structured op input at the given position is equal to the given value.
+  StructuredOpMatcher &input(int64_t position, ElementTypeBitWidth width);
+
+  /// Capture the elemental type bitwidth of input operand `position`.
+  StructuredOpMatcher &input(int64_t position,
+                             CaptureElementTypeBitWidth width);
 
   //===-------------------------------------------------------------------===//
   // Constraints on adjacent ops.
@@ -306,11 +310,6 @@ public:
   // Constraints on output operands.
   //===-------------------------------------------------------------------===//
 
-  /// Adds a predicate that recursively applies another predicate to the
-  /// operation defining the `position`-th output operand, looking through any
-  /// "subsetting" operation such as "tensor.extract_slice".
-  StructuredOpMatcher &output(int64_t position, SubsetOf subset);
-
   /// Adds a predicate checking that the structured op has the given number of
   /// outputs.
   StructuredOpMatcher &output(NumEqualsTo num);
@@ -326,6 +325,10 @@ public:
   /// Adds a predicate checking that the bit width of the elemental type of the
   /// structured op output at the given position is equal to the given value.
   StructuredOpMatcher &output(int64_t position, ElementTypeBitWidth width);
+
+  /// Capture the elemental type bitwidth of output operand `position`.
+  StructuredOpMatcher &output(int64_t position,
+                              CaptureElementTypeBitWidth width);
 
   /// Adds a predicate checking that the output of the structured op is produced
   /// by a reduction with a single-operation combinator (such as addf or mulf,
@@ -377,14 +380,6 @@ public:
     recordNestedMatcher(resultUserMatcher);
     return *this;
   }
-
-  /// Adds a predicate that recursively applies to users of the `positions`-th
-  /// result, looking through any "subsetting" operation such as
-  /// "tensor.extract_slice". Succeeds if any user matches the predicate.
-  /// When the match is optional, the predicate check succeeds as long as the
-  /// `position` is in bounds, after running the given matcher.
-  StructuredOpMatcher &result(int64_t position, HasAnyUse tag, SubsetOf subset,
-                              OptionalMatch optional = OptionalMatch(false));
 
   /// Resets the captured value to null. This should be called if the same
   /// pattern needs to be applied more than once as it may keep captured values
@@ -459,15 +454,15 @@ inline StructuredOpMatcher m_StructuredOp() {
 class MatchCallbackResult {
 public:
   /// Returns the number of lists of payload operations.
-  unsigned getNumPayloadGroups() const { return payloadGroupLengths.size(); }
+  int64_t getNumPayloadGroups() const { return payloadGroupLengths.size(); }
 
   /// Returns the `position`-th list of payload operations.
-  ArrayRef<Operation *> getPayloadGroup(unsigned position) const;
+  ArrayRef<Operation *> getPayloadGroup(int64_t position) const;
 
   /// Adds a new list of payload operations to the list of lists. The new list
   /// must not contain null operations.
   template <typename Range>
-  unsigned addPayloadGroup(Range operations) {
+  int64_t addPayloadGroup(Range operations) {
     int64_t originalLength = payloadOperations.size();
     assert(llvm::all_of(operations, [](Operation *op) -> bool { return op; }) &&
            "null operation");
@@ -538,11 +533,14 @@ private:
 
 struct MatchedReductionCaptures {
   int64_t reductionRank = 0;
-  // TODO: capture all dims.
-  int64_t mostMinorParallelDimensionSize = 0;
-  int64_t reductionDimensionSize = 0;
   int64_t maybeLeadingRank = 0;
   int64_t maybeTrailingRank = 0;
+  SmallVector<int64_t> leadingOpSizes = {};
+  SmallVector<int64_t> reductionOpSizes = {};
+  SmallVector<int64_t> trailingOpSizes = {};
+  int64_t reductionOutputElementalTypeBitWidth = 0;
+  int64_t maybeLeadingOutputElementalTypeBitWidth = 0;
+  int64_t maybeTrailingOutputElementalTypeBitWidth = 0;
 };
 
 /// Creates a group of matchers for:
@@ -556,23 +554,6 @@ void makeReductionMatcher(StructuredOpMatcher &reduction,
                           StructuredOpMatcher &leading,
                           StructuredOpMatcher &trailing,
                           MatchedReductionCaptures &captures);
-
-/// Creates a group of matchers for:
-///
-///     trailing(
-///       combiner_reduction(
-///         parallel_reduction(leading(), parallel_fill()),
-///         original_fill())))
-///
-/// where trailing and leading are elementwise operations whose presence is
-/// optional, and with subsetting ops potentially present on the operand use-def
-/// chains.
-void makeSplitReductionMatcher(StructuredOpMatcher &parallel_reduction,
-                               StructuredOpMatcher &combiner_reduction,
-                               StructuredOpMatcher &parallel_fill,
-                               StructuredOpMatcher &original_fill,
-                               StructuredOpMatcher &leading,
-                               StructuredOpMatcher &trailing);
 
 } // namespace transform_ext
 } // namespace mlir

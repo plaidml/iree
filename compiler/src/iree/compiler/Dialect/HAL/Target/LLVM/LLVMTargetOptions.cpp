@@ -15,18 +15,19 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Host.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/TargetParser/X86TargetParser.h"
 
 namespace mlir {
 namespace iree_compiler {
 namespace IREE {
 namespace HAL {
 
-LLVMTargetOptions getDefaultLLVMTargetOptions() {
+static LLVMTargetOptions getDefaultLLVMTargetOptions() {
   static LLVMTargetOptions targetOptions;
   static std::once_flag onceFlag;
   std::call_once(onceFlag, [&]() {
-    // Host target triple.
-    targetOptions.target.triple = llvm::sys::getDefaultTargetTriple();
+    // Get process target triple along with host CPU name and features.
+    targetOptions.target.triple = llvm::sys::getProcessTriple();
     targetOptions.target.cpu = llvm::sys::getHostCPUName().str();
     {
       llvm::SubtargetFeatures features;
@@ -59,6 +60,20 @@ LLVMTargetOptions getDefaultLLVMTargetOptions() {
     targetOptions.options.UniqueSectionNames = true;
   });
   return targetOptions;
+}
+
+static void addTargetCPUFeaturesForCPU(LLVMTarget &target) {
+  if (!llvm::Triple(target.triple).isX86()) {
+    // Currently only implemented on x86.
+    return;
+  }
+  llvm::SubtargetFeatures targetCpuFeatures(target.cpuFeatures);
+  llvm::SmallVector<llvm::StringRef> cpuFeatures;
+  llvm::X86::getFeaturesForCPU(target.cpu, cpuFeatures);
+  for (auto &feature : cpuFeatures) {
+    targetCpuFeatures.AddFeature(feature);
+  }
+  target.cpuFeatures = targetCpuFeatures.getString();
 }
 
 LLVMTargetOptions getLLVMTargetOptionsFromFlags() {
@@ -98,6 +113,9 @@ LLVMTargetOptions getLLVMTargetOptionsFromFlags() {
   }
   if (clTargetCPUFeatures != "host") {
     targetOptions.target.cpuFeatures = clTargetCPUFeatures;
+  }
+  if (clTargetCPU != "host" && clTargetCPU != "generic") {
+    addTargetCPUFeaturesForCPU(targetOptions.target);
   }
 
   // LLVM opt options.

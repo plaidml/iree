@@ -50,10 +50,11 @@ static FailureOr<Value> gpuAllocateWorkgroupMemoryFn(OpBuilder &builder,
                                                      MemRefType memRefType,
                                                      ValueRange dynamicSizes,
                                                      unsigned alignment) {
-  Optional<unsigned> space =
-      spirv::mapVulkanStorageClassToMemorySpace(spirv::StorageClass::Workgroup);
-  MemRefType allocType = MemRefType::get(
-      memRefType.getShape(), memRefType.getElementType(), {}, *space);
+  auto workgroupSpace = gpu::AddressSpaceAttr::get(
+      builder.getContext(), gpu::GPUDialect::getWorkgroupAddressSpace());
+  MemRefType allocType =
+      MemRefType::get(memRefType.getShape(), memRefType.getElementType(),
+                      AffineMap(), workgroupSpace);
   return builder
       .create<memref::AllocOp>(loc, allocType, dynamicSizes,
                                builder.getI64IntegerAttr(alignment))
@@ -223,12 +224,12 @@ static void addSPIRVLoweringPasses(OpPassManager &pm, bool enableFastMath) {
 
   OpPassManager &spirvPM = pm.nest<spirv::ModuleOp>();
   spirvPM.addPass(spirv::createUnifyAliasedResourcePass(getTargetEnv));
-  spirvPM.addPass(spirv::createLowerABIAttributesPass());
+  spirvPM.addPass(spirv::createSPIRVLowerABIAttributesPass());
   spirvPM.addPass(createCanonicalizerPass());
   spirvPM.addPass(createCSEPass());
-  spirvPM.addPass(spirv::createRewriteInsertsPass());
-  spirvPM.addPass(spirv::createCanonicalizeGLPass());
-  spirvPM.addPass(spirv::createUpdateVersionCapabilityExtensionPass());
+  spirvPM.addPass(spirv::createSPIRVRewriteInsertsPass());
+  spirvPM.addPass(spirv::createSPIRVCanonicalizeGLPass());
+  spirvPM.addPass(spirv::createSPIRVUpdateVCEPass());
 }
 
 //===----------------------------------------------------------------------===//
@@ -427,7 +428,7 @@ void addSPIRVSubgroupReducePassPipeline(OpPassManager &pm) {
   // Performs mechanical vectorization. This does not perform unrolling or
   // lowering, which is done later.
   nestedModulePM.addNestedPass<func::FuncOp>(createGPUVectorizationPass(
-      /*generateContract=*/false));
+      /*generateContract=*/false, /*maxVectorSize=*/32768));
   nestedModulePM.addNestedPass<func::FuncOp>(
       createLoopInvariantCodeMotionPass());
   nestedModulePM.addNestedPass<func::FuncOp>(createCanonicalizerPass());

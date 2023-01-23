@@ -171,6 +171,15 @@ iree_compiler_invocation_t *ireeCompilerInvocationCreate(
   return __ireeCompilerInvocationCreate(session);
 }
 
+void ireeCompilerInvocationEnableCallbackDiagnostics(
+    iree_compiler_invocation_t *inv, int flags,
+    void (*callback)(enum iree_compiler_diagnostic_severity_t severity,
+                     const char *message, size_t messageSize, void *userData),
+    void *userData) {
+  __ireeCompilerInvocationEnableCallbackDiagnostics(inv, flags, callback,
+                                                    userData);
+}
+
 void ireeCompilerInvocationEnableConsoleDiagnostics(
     iree_compiler_invocation_t *run) {
   __ireeCompilerInvocationEnableConsoleDiagnostics(run);
@@ -178,6 +187,15 @@ void ireeCompilerInvocationEnableConsoleDiagnostics(
 
 void ireeCompilerInvocationDestroy(iree_compiler_invocation_t *run) {
   __ireeCompilerInvocationDestroy(run);
+}
+
+void ireeCompilerInvocationSetCrashHandler(
+    iree_compiler_invocation_t *inv, bool genLocalReproducer,
+    iree_compiler_error_t *(*onCrashCallback)(
+        iree_compiler_output_t **outOutput, void *userData),
+    void *userData) {
+  __ireeCompilerInvocationSetCrashHandler(inv, genLocalReproducer,
+                                          onCrashCallback, userData);
 }
 
 bool ireeCompilerInvocationParseSource(iree_compiler_invocation_t *run,
@@ -232,9 +250,10 @@ iree_compiler_error_t *ireeCompilerSourceOpenFile(
 
 iree_compiler_error_t *ireeCompilerSourceWrapBuffer(
     iree_compiler_session_t *session, const char *bufferName,
-    const char *buffer, size_t length, iree_compiler_source_t **out_source) {
+    const char *buffer, size_t length, bool isNullTerminated,
+    iree_compiler_source_t **out_source) {
   return __ireeCompilerSourceWrapBuffer(session, bufferName, buffer, length,
-                                        out_source);
+                                        isNullTerminated, out_source);
 }
 
 iree_compiler_error_t *ireeCompilerSourceSplit(
@@ -258,8 +277,8 @@ iree_compiler_error_t *ireeCompilerOutputOpenFD(
   return __ireeCompilerOutputOpenFD(fd, out_output);
 }
 
-void ireeCompileOutputKeep(iree_compiler_output_t *output) {
-  __ireeCompileOutputKeep(output);
+void ireeCompilerOutputKeep(iree_compiler_output_t *output) {
+  __ireeCompilerOutputKeep(output);
 }
 
 iree_compiler_error_t *ireeCompilerOutputWrite(iree_compiler_output_t *output,

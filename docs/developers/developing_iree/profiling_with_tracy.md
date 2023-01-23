@@ -85,7 +85,7 @@ Install other dependencies:
 brew install glfw freetype
 ```
 
-## Build the Tracy tools ("servers")
+## Build the Tracy tools
 
 A CMake-based build system for Tracy is maintained as part of IREE. In your IREE
 desktop build directory, set the following CMake option:
@@ -95,7 +95,9 @@ $ cmake -DIREE_BUILD_TRACY=ON .
 ```
 
 That enables building the Tracy server tools, `iree-tracy-profiler` and
-`iree-tracy-capture`, introduced above.
+`iree-tracy-capture`, introduced above. It also enables building the tool
+`iree-tracy-csvexport` which can be used to export a captured trace as a
+CSV file (see Section 6 "Exporting zone statistics to CSV" in the Tracy manual).
 
 If profiling on Android/ARM, you might need the patch discussed in the next
 paragraph.
@@ -105,37 +107,21 @@ At least `iree-tracy-profiler` has some
 [faulty assertions](https://github.com/wolfpld/tracy/pull/382) that can cause
 the profiler UI to crash during normal usage.
 
-Rebuild, either everything or just these one or two targets:
+Rebuild, either everything or just these specific targets:
 
 ```shell
-cmake --build . --target iree-tracy-profiler iree-tracy-capture
+cmake --build . --target iree-tracy-profiler iree-tracy-capture iree-tracy-csvexport
 ```
 
-This should have created the `iree-tracy-profiler` and `iree-tracy-capture`
-binaries:
+This should have created the `iree-tracy-profiler`, `iree-tracy-capture`, and
+`iree-tracy-csvexport` binaries:
 
 ```shell
 $ find . -name iree-tracy-*
 ./tracy/iree-tracy-profiler
 ./tracy/iree-tracy-capture
+./tracy/iree-tracy-csvexport
 ```
-
-### Patch needed for Android/ARM
-
-You might need to patch
-[Tracy PR #383](https://github.com/wolfpld/tracy/pull/383) in order for Tracy to
-get IREE module symbols, but it's a gross hack that I hesitate to recommend
-unless you know you need it. The symptom would be that Tracy can't see the IREE
-module code symbols at all. This has happened on Android/ARM(64bit) so far.
-
-It won't even work on x86 as it assumes that all instructions are 4 bytes.
-
-To patch:
-
-*   Download
-    [383.diff](https://patch-diff.githubusercontent.com/raw/wolfpld/tracy/pull/383.diff).
-*   In IREE source tree: `cd third_party/tracy && patch -p1 <
-    ~/Downloads/383.diff`
 
 ## Build IREE binaries with Tracy instrumentation ("clients")
 
@@ -254,6 +240,25 @@ user and it's best to stick to this for the sake of realistic benchmarks.
 Internally, Tracy executes `su` commands to perform certain actions, so it too
 relies on the device being *rooted* without relying on the benchmark process
 being run as root.
+
+## "RESOURCE_EXHAUSTED; failed to open file" issue
+
+This is a
+[known issue with how tracy operates](https://github.com/wolfpld/tracy/issues/512).
+One way to workaround it is to manually increase the total number of files
+that can be kept opened simultanously and run the benchmark command with that
+setting:
+```
+sudo sh -c "ulimit -n <bigNum> && <myTracyInstrumentedProgram>"
+```
+
+**Explanation:**
+
+Tracy keeps a number of file descriptors open that, depending on the machine and
+its settings, may exceed the limit allowed by the system resulting in `iree`
+to fail to open more files.
+In particular, it is commom to have a relatively low limit when running
+with `sudo`.
 
 ## Running the Tracy Capture CLI, connecting and saving profiles
 

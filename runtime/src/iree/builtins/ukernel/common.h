@@ -225,17 +225,17 @@ IREE_UK_STATIC_ASSERT(sizeof(iree_uk_uint32_t) == 4);
 IREE_UK_STATIC_ASSERT(sizeof(iree_uk_uint64_t) == 8);
 
 #define IREE_UK_INT8_MIN (-127i8 - 1)
-#define IREE_UK_INT16_MIN (-32767i16 - 1)
-#define IREE_UK_INT32_MIN (-2147483647i32 - 1)
-#define IREE_UK_INT64_MIN (-9223372036854775807i64 - 1)
+#define IREE_UK_INT16_MIN (-32767 - 1)
+#define IREE_UK_INT32_MIN (-2147483647 - 1)
+#define IREE_UK_INT64_MIN (-9223372036854775807LL - 1)
 #define IREE_UK_INT8_MAX 127i8
-#define IREE_UK_INT16_MAX 32767i16
-#define IREE_UK_INT32_MAX 2147483647i32
-#define IREE_UK_INT64_MAX 9223372036854775807i64
-#define IREE_UK_UINT8_MAX 0xffui8
-#define IREE_UK_UINT16_MAX 0xffffui16
-#define IREE_UK_UINT32_MAX 0xffffffffui32
-#define IREE_UK_UINT64_MAX 0xffffffffffffffffui64
+#define IREE_UK_INT16_MAX 32767
+#define IREE_UK_INT32_MAX 2147483647
+#define IREE_UK_INT64_MAX 9223372036854775807LL
+#define IREE_UK_UINT8_MAX 0xff
+#define IREE_UK_UINT16_MAX 0xffff
+#define IREE_UK_UINT32_MAX 0xffffffffU
+#define IREE_UK_UINT64_MAX 0xffffffffffffffffULL
 
 // Helper for microkernel input validation
 #define IREE_UK_VALUE_IN_UNSIGNED_INT_RANGE(VALUE, BIT_COUNT) \
@@ -278,67 +278,28 @@ static inline void iree_uk_ssize_swap(iree_uk_ssize_t* a, iree_uk_ssize_t* b) {
 #endif
 
 //===----------------------------------------------------------------------===//
-// Status codes returned by microkernels.
+// Local replacement for <assert.h>
 //===----------------------------------------------------------------------===//
 
-// When IREE_UK_ENABLE_VALIDATION is defined, ukernels validate their inputs and
-// may return statuses other than iree_uk_status_ok.
-//
-// When IREE_UK_ENABLE_VALIDATION is not defined, statuses other than
-// iree_uk_status_ok are not even defined.
-//
-// Currently IREE_UK_ENABLE_VALIDATION is defined if and only if NDEBUG is not,
-// that is, validation treated as assertions, disabling them in release.
-//
-// This actually enables more thorough validation as it removes optimization
-// concerns from the validation code. Microkernels take raw
-// pointers/sizes/strides anyway, so if params are incorrect, UB will happen no
-// matter how much we try to validate.
+// Microkernel code needs to be stand-alone, not including the standard library
+// (see comment in common.h). But it's hard to implement assertion failure
+// without the standard library. So it's up to each piece of code that uses
+// microkernels, to provide its own implementation of this function.
+extern void iree_uk_assert_fail(const char* file, int line,
+                                const char* function, const char* condition);
+
 #ifndef NDEBUG
-#define IREE_UK_ENABLE_VALIDATION
+#define IREE_UK_ENABLE_ASSERTS
 #endif
 
-// Status codes that ukernels may return.
-typedef enum iree_uk_status_e {
-  iree_uk_status_ok = 0,
-#ifdef IREE_UK_ENABLE_VALIDATION
-  iree_uk_status_bad_type,
-  iree_uk_status_bad_flags,
-  iree_uk_status_unsupported_huge_or_negative_dimension,
-  iree_uk_status_unsupported_generic_tile_size,
-  iree_uk_status_shapes_mismatch,
-#endif
-} iree_uk_status_t;
-
-#ifdef IREE_UK_ENABLE_VALIDATION
-// Convert a status code to a human-readable string.
-IREE_UK_EXPORT const char* iree_uk_status_message(iree_uk_status_t status);
-#else
-static inline const char* iree_uk_status_message(iree_uk_status_t status) {
-  // Typical callers do:
-  //
-  //   iree_uk_status_t status = iree_uk_someukernel(&ukernel_params);
-  //   if (status != iree_uk_status_ok) {
-  //     return iree_make_status(IREE_STATUS_INTERNAL,
-  //                             iree_uk_status_message(status));
-  //   }
-  //
-  // The below UNREACHABLE actually helps Clang 16 elide the caller's
-  // `if (status != iree_uk_status_ok)` branch: https://godbolt.org/z/xoanddxrv
-  if (status != iree_uk_status_ok) {
-    IREE_UK_ASSUME_UNREACHABLE;
-  }
-  return "OK";
-}
-#endif
-
-#define IREE_UK_RETURN_IF_ERROR(X)     \
-  do {                                 \
-    iree_uk_status_t status = (X);     \
-    if (status != iree_uk_status_ok) { \
-      return status;                   \
-    }                                  \
+#ifdef IREE_UK_ENABLE_ASSERTS
+#define IREE_UK_ASSERT(COND)                                               \
+  do {                                                                     \
+    if (!(COND)) iree_uk_assert_fail(__FILE__, __LINE__, __func__, #COND); \
   } while (0)
+#else
+#define IREE_UK_ASSERT(COND)
+#endif
 
 //===----------------------------------------------------------------------===//
 // Element type IDs for the data accessed by microkernels.

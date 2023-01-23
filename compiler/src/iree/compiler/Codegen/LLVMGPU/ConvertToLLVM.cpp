@@ -55,10 +55,13 @@ void ConvertToDynamicSharedMemory(ModuleOp moduleOp) {
       offset = globalMemoryOffsetMap[globalOp];
     } else {
       offset = numberOfBytes;
+      if (std::optional<uint64_t> alignment = globalOp.getAlignment()) {
+        offset = llvm::alignTo(offset, *alignment);
+      }
       globalMemoryOffsetMap[globalOp] = offset;
       auto thisarray = globalOp.getType();
       DataLayout dataLayout = DataLayout::closest(addressOfOp);
-      numberOfBytes += dataLayout.getTypeSizeInBits(thisarray) / 8;
+      numberOfBytes = offset + dataLayout.getTypeSizeInBits(thisarray) / 8;
     }
     auto loc = addressOfOp.getLoc();
     builder.setInsertionPoint(addressOfOp);
@@ -138,6 +141,18 @@ struct ConvertSharedMemAllocOp : public OpRewritePattern<memref::AllocOp> {
                      [](int64_t dim) { return dim == ShapedType::kDynamic; })) {
       return failure();
     }
+
+    uint64_t alignement;
+    if (llvm::Optional<uint64_t> alignementInfo = allocOp.getAlignment()) {
+      alignement = alignementInfo.value();
+    } else {
+      // If no alignment specified align at least to the size of an element.
+      Type elType = allocOp.getType().getElementType();
+      if (auto shapeType = elType.dyn_cast<ShapedType>())
+        alignement = shapeType.getSizeInBits() / 8;
+      else
+        alignement = elType.getIntOrFloatBitWidth() / 8;
+    }
     // In CUDA workgroup memory is represented by a global variable.
     MemRefType allocType = allocOp.getType();
     auto funcOp = allocOp->getParentOfType<func::FuncOp>();
@@ -150,7 +165,8 @@ struct ConvertSharedMemAllocOp : public OpRewritePattern<memref::AllocOp> {
         /*sym_visibility=*/rewriter.getStringAttr("private"),
         /*type=*/allocType,
         /*initial_value=*/ElementsAttr(),
-        /*constant=*/false, /*alignment=*/IntegerAttr());
+        /*constant=*/false,
+        /*alignment=*/rewriter.getI64IntegerAttr(alignement));
     symbolTable.insert(global);
 
     rewriter.setInsertionPointToStart(&(*funcOp.getFunctionBody().begin()));
@@ -286,6 +302,26 @@ class ConvertIREEBindingSubspanOp : public ConvertToLLVMPattern {
       : ConvertToLLVMPattern(
             IREE::HAL::InterfaceBindingSubspanOp::getOperationName(), context,
             converter) {}
+
+  /// Checks all subspanOps with the same binding has readonly attribute
+  static bool checkAllSubspansReadonly(LLVM::LLVMFuncOp llvmFuncOp,
+                                       APInt binding) {
+    bool allReadOnly = false;
+    llvmFuncOp.walk([&](IREE::HAL::InterfaceBindingSubspanOp op) {
+      if (op.getBinding() == binding) {
+        if (!bitEnumContainsAny(op.getDescriptorFlags().value_or(
+                                    IREE::HAL::DescriptorFlags::None),
+                                IREE::HAL::DescriptorFlags::ReadOnly)) {
+          allReadOnly = false;
+          return WalkResult::interrupt();
+        }
+        allReadOnly = true;
+      }
+      return WalkResult::advance();
+    });
+    return allReadOnly;
+  }
+
   LogicalResult matchAndRewrite(
       Operation *op, ArrayRef<Value> operands,
       ConversionPatternRewriter &rewriter) const override {
@@ -308,6 +344,18 @@ class ConvertIREEBindingSubspanOp : public ConvertToLLVMPattern {
     llvmFuncOp.setArgAttr(llvmBufferArg.getArgNumber(),
                           LLVM::LLVMDialect::getAlignAttrName(),
                           rewriter.getI32IntegerAttr(16));
+    // It is safe to set the noalias attribute as it is guaranteed that the
+    // ranges within bindings won't alias.
+    llvmFuncOp.setArgAttr(llvmBufferArg.getArgNumber(),
+                          LLVM::LLVMDialect::getNoAliasAttrName(),
+                          rewriter.getUnitAttr());
+    if (checkAllSubspansReadonly(llvmFuncOp, subspanOp.getBinding())) {
+      // Setting the readonly attribute here will generate non-coherent cache
+      // loads.
+      llvmFuncOp.setArgAttr(llvmBufferArg.getArgNumber(),
+                            LLVM::LLVMDialect::getReadonlyAttrName(),
+                            rewriter.getUnitAttr());
+    }
     // Add the byte offset.
     Value llvmBufferBasei8Ptr = rewriter.create<LLVM::BitcastOp>(
         loc,

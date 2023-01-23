@@ -50,7 +50,7 @@ pushd ${ROOT_DIR?}/build-emscripten > /dev/null
 # Configure using Emscripten's CMake wrapper, then build.
 emcmake "${CMAKE_BIN?}" -G Ninja .. \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-    -DIREE_HOST_BINARY_ROOT=${INSTALL_ROOT} \
+    -DIREE_HOST_BIN_DIR="${INSTALL_ROOT}/bin" \
     -DIREE_BUILD_COMPILER=OFF \
     -DIREE_HAL_DRIVER_DEFAULTS=OFF \
     -DIREE_HAL_DRIVER_LOCAL_SYNC=ON \
@@ -59,6 +59,7 @@ emcmake "${CMAKE_BIN?}" -G Ninja .. \
     -DIREE_HAL_EXECUTABLE_LOADER_VMVX_MODULE=ON \
     -DIREE_BUILD_SAMPLES=OFF \
     -DIREE_ENABLE_CPUINFO=OFF \
+    -DIREE_ENABLE_ASAN=OFF \
     -DIREE_BUILD_TESTS=ON
 
 echo "=== Building default targets ==="
