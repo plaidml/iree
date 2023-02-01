@@ -568,15 +568,26 @@ transform_dialect::VectorWarpDistributionOp::applyToOne(
   // automatically get listening capabilities.
 
   MLIRContext *ctx = target->getContext();
-  RewritePatternSet patterns(ctx);
   // MultiReduction lowering is necessary until we have explicit support for
   // distributing that op.
-  populateMultiReductionLoweringPatterns(target, patterns, /*benefit=*/3);
+  RewritePatternSet preProcessingPatterns(ctx);
+  populateMultiReductionLoweringPatterns(target, preProcessingPatterns,
+                                         /*benefit=*/1);
+  vector::ShapeCastOp::getCanonicalizationPatterns(preProcessingPatterns, ctx);
+  vector::BroadcastOp::getCanonicalizationPatterns(preProcessingPatterns, ctx);
+  vector::ExtractOp::getCanonicalizationPatterns(preProcessingPatterns, ctx);
+  if (failed(applyPatternsAndFoldGreedily(target,
+                                          std::move(preProcessingPatterns)))) {
+    return mlir::emitDefiniteFailure(target,
+                                     "multi-reduce patterns failed to apply");
+  }
+
+  RewritePatternSet patterns(ctx);
   populateVectorTransferWriteDistribution(target, patterns, /*benefit=*/2);
   populatePropagateVectorDistribution(target, patterns, /*benefit=*/1);
   if (failed(applyPatternsAndFoldGreedily(target, std::move(patterns)))) {
-    target->emitOpError("warp distribution patterns failed to apply");
-    return emitDefaultDefiniteFailure(target);
+    return mlir::emitDefiniteFailure(
+        target, "warp distribution patterns failed to apply");
   }
 
   RewritePatternSet endPatterns(ctx);
@@ -585,9 +596,8 @@ transform_dialect::VectorWarpDistributionOp::applyToOne(
   options.warpSyncronizationFn = warpSyncronizationFn;
   populateWarpExecuteOnLane0ToScf(target, endPatterns, options, /*benefit=*/0);
   if (failed(applyPatternsAndFoldGreedily(target, std::move(endPatterns)))) {
-    target->emitOpError(
-        "warp execute on lane 0 to scf patterns failed to apply");
-    return emitDefaultDefiniteFailure(target);
+    return mlir::emitDefiniteFailure(
+        target, "warp execute on lane 0 to scf patterns failed to apply");
   }
 
   return DiagnosedSilenceableFailure::success();
