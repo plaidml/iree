@@ -61,6 +61,9 @@ if(IREE_INPUT_TOSA)
   list(APPEND IREE_INPUT_DEPS MLIRTosaDialect)
   list(APPEND IREE_INPUT_DEPS MLIRTosaTransforms)
 endif()
+if(IREE_BUILD_EXPERIMENTAL_TPP)
+  set(TPP_LIB MLIRTPP)
+endif()
 
 iree_cc_library(
   NAME
