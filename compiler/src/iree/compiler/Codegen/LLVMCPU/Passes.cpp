@@ -24,6 +24,8 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "TPP/Passes.h"
+
 #define DEBUG_TYPE "iree-llvm-cpu-lowering-pass-pipeline"
 
 namespace mlir {
@@ -713,6 +715,32 @@ void addCPUDataTilingPipeline(OpPassManager &passManager) {
       createSplitFullPartialTransferPass("linalg-copy"));
 }
 
+void addCPUTppXsmmPassPipeline(OpPassManager &passManager) {
+  OpPassManager &nestedModulePM = passManager.nest<ModuleOp>();
+  addBufferizePasses(nestedModulePM);
+
+  //--------------------------------------------------------------------
+  //     TPP generation passes
+  //--------------------------------------------------------------------
+  // Convert generics to BRGEMM.
+  // The mapping is done after bufferization as the buffer semantics
+  // allow direct use of scf.parallel loops. This prevents different
+  // lowering outputs between input linalg on tensors and memrefs.
+  nestedModulePM.addNestedPass<func::FuncOp>(tpp::createMapToBatchReduceGEMMPass());
+
+  // Convert all higher level dialects to TPP.
+  nestedModulePM.addNestedPass<func::FuncOp>(tpp::createConvertLinalgToTppPass());
+  // Pass is restricted to module; cannot be invoked on a function
+  //passManager.addPass(tpp::createConvertVNNIToTppPass());
+
+  // Lower all TPP ops.
+  nestedModulePM.addNestedPass<func::FuncOp>(tpp::createConvertTppToXsmmPass());
+
+  // Lower all XSMM ops.
+  // Pass is restricted to module; cannot be invoked on a function
+  //nestedModulePM.addNestedPass<func::FuncOp>(tpp::createConvertXsmmToFuncPass());
+}
+
 void addCPUDefaultPassPipeline(OpPassManager &passManager) {
   addTileAndDistributePasses(passManager);
   OpPassManager &nestedModulePM = passManager.nest<ModuleOp>();
@@ -768,6 +796,26 @@ static void addLowerToLLVMPasses(OpPassManager &passManager) {
   if (clCheckIRBeforeLLVMConversion && !clEnableHoistPadding) {
     passManager.addPass(createLLVMCPUCheckIRBeforeLLVMConversionPass());
   }
+
+  #if 0
+  // -------------------------------------------------------------------
+  // TPP lowering passes
+  // -------------------------------------------------------------------
+  // Lower all TPP ops
+  passManager.addNestedPass<func::FuncOp>(tpp::createConvertTppToXsmmPass());
+  // Lower all LinalgX ops.
+  //passManager.addPass(tpp::createLinalgXToLoopsPass());
+  // Postprocess generated loops.
+  // Perform LICM before function calls are generated to ensure that ops which
+  // map directly to functions also get moved outside of loops, if possible.
+  // This approach assumes that the function calls do not have any side
+  // effects and can be safely moved outside of loop body.
+  passManager.addPass(createLoopInvariantCodeMotionPass());
+  //passManager.addPass(createParallelLoopFusionPass());
+  // Lower all XSMM ops.
+  passManager.addPass(tpp::createConvertXsmmToFuncPass());
+  // -------------------------------------------------------------------
+  #endif
 
   // SCF -> CF
   passManager.addNestedPass<func::FuncOp>(createConvertSCFToCFPass());

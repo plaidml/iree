@@ -29,6 +29,8 @@ def CPU_TripleTilingExpert : I32EnumAttrCase<"CPUTripleTilingExpert", 7>;
 
 def CPU_DataTiling
     : I32EnumAttrCase<"CPUDataTiling", 8>;
+def CPU_TppXsmm
+    : I32EnumAttrCase<"CPUTppXsmm", 22>;
 
 def LLVMGPU_SimpleDistribute : I32EnumAttrCase<"LLVMGPUDistribute", 9>;
 def LLVMGPU_Vectorize : I32EnumAttrCase<"LLVMGPUVectorize", 10>;
@@ -68,6 +70,7 @@ def DispatchLoweringPassPipelineEnum
                     CPU_ConvTileAndDecomposeExpert, CPU_Mmt4dTilingExpert,
                     CPU_BufferOpsTileAndVectorize, CPU_TripleTilingExpert,
                     CPU_DataTiling, LLVMGPU_SimpleDistribute,
+                    CPU_TppXsmm,
                     LLVMGPU_Vectorize, LLVMGPU_MatmulSimt, LLVMGPU_MatmulTensorCore,
                     LLVMGPU_TransposeSharedMem, LLVMGPU_WarpReduction,
                     SPIRV_BaseDistribute, SPIRV_BaseVectorize,

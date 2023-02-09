@@ -23,6 +23,9 @@
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "TPP/Dialect/Tpp/TppDialect.h"
+#include "TPP/Dialect/Xsmm/XsmmDialect.h"
+
 namespace mlir {
 namespace iree_compiler {
 
@@ -52,6 +55,8 @@ class LLVMCPULowerExecutableTargetPass
                     pdl_interp::PDLInterpDialect,
                     scf::SCFDialect,
                     tensor::TensorDialect,
+                    tpp::TppDialect,
+                    xsmm::XsmmDialect,
                     transform::TransformDialect,
                     vector::VectorDialect>();
     // clang-format on
@@ -232,6 +237,9 @@ void LLVMCPULowerExecutableTargetPass::runOnOperation() {
             break;
           case IREE::Codegen::DispatchLoweringPassPipeline::CPUDataTiling:
             addCPUDataTilingPipeline(executableLoweringPipeline);
+            break;
+          case IREE::Codegen::DispatchLoweringPassPipeline::CPUTppXsmm:
+            addCPUTppXsmmPassPipeline(executableLoweringPipeline);
             break;
           case IREE::Codegen::DispatchLoweringPassPipeline::VMVXDefault:
             addVMVXDefaultPassPipeline(executableLoweringPipeline,
