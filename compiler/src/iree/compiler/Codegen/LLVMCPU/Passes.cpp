@@ -24,9 +24,12 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
+<<<<<<< HEAD
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Transforms.h"
+=======
+>>>>>>> e5a848fa6 (Working integration of LinalgToTpp and TppToXsmm passes as DispatchLoweringPipeline)
 #include "TPP/Passes.h"
 
 #define DEBUG_TYPE "iree-llvm-cpu-lowering-pass-pipeline"
@@ -728,6 +731,26 @@ static void addLowerToLLVMPasses(OpPassManager &passManager) {
   if (clCheckIRBeforeLLVMConversion) {
     passManager.addPass(createLLVMCPUCheckIRBeforeLLVMConversionPass());
   }
+
+  #if 0
+  // -------------------------------------------------------------------
+  // TPP lowering passes
+  // -------------------------------------------------------------------
+  // Lower all TPP ops
+  passManager.addNestedPass<func::FuncOp>(tpp::createConvertTppToXsmmPass());
+  // Lower all LinalgX ops.
+  //passManager.addPass(tpp::createLinalgXToLoopsPass());
+  // Postprocess generated loops.
+  // Perform LICM before function calls are generated to ensure that ops which
+  // map directly to functions also get moved outside of loops, if possible.
+  // This approach assumes that the function calls do not have any side
+  // effects and can be safely moved outside of loop body.
+  passManager.addPass(createLoopInvariantCodeMotionPass());
+  //passManager.addPass(createParallelLoopFusionPass());
+  // Lower all XSMM ops.
+  passManager.addPass(tpp::createConvertXsmmToFuncPass());
+  // -------------------------------------------------------------------
+  #endif
 
   // SCF -> CF
   passManager.addNestedPass<func::FuncOp>(createConvertSCFToCFPass());
