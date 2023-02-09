@@ -25,9 +25,6 @@
 #include "TPP/Dialect/Tpp/TppDialect.h"
 #include "TPP/Dialect/Xsmm/XsmmDialect.h"
 
-#include "TPP/Dialect/Tpp/TppDialect.h"
-#include "TPP/Dialect/Xsmm/XsmmDialect.h"
-
 namespace mlir {
 namespace iree_compiler {
 

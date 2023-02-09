@@ -788,7 +788,10 @@ static LogicalResult setMatmulPadRootConfig(
 
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, op, tileSizes,
-      DispatchLoweringPassPipeline::CPUDoubleTilingPadExpert);
+      //DispatchLoweringPassPipeline::CPUDoubleTilingPadExpert);
+      // This is a hack currently.
+      // We need to define proper RootConfig function to invoke our Tpp->Xsmm->func lowering pipeline.
+      DispatchLoweringPassPipeline::CPUTppXsmm);
 }
 
 static DispatchLoweringPassPipeline getNoPadTilingExpert(
