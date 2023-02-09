@@ -29,7 +29,7 @@ def CPU_BufferOpsTileAndVectorize
 def CPU_DataTiling
     : I32EnumAttrCase<"CPUDataTiling", 7>;
 def CPU_TppXsmm
-    : I32EnumAttrCase<"CPUTppXsmm", 24>;
+    : I32EnumAttrCase<"CPUTppXsmm", 22>;
 
 def LLVMGPU_SimpleDistribute : I32EnumAttrCase<"LLVMGPUDistribute", 8>;
 def LLVMGPU_Vectorize : I32EnumAttrCase<"LLVMGPUVectorize", 9>;
@@ -64,22 +64,24 @@ def None : I32EnumAttrCase<"None", 0xff>;
 // EnumAttrCase for all known lowerings for ops within dispatch region
 // to scalar/native-vector code.
 def DispatchLoweringPassPipelineEnum
-    : I32EnumAttr<
-          "DispatchLoweringPassPipeline",
-          "identifier for pass pipeline use to lower dispatch region", [
-            CPU_Default, CPU_DoubleTilingExpert, CPU_DoubleTilingPadExpert,
-            CPU_DoubleTilingPeelingExpert, CPU_ConvTileAndDecomposeExpert,
-            CPU_Mmt4dTilingExpert, CPU_BufferOpsTileAndVectorize,
-            CPU_TripleTilingExpert, CPU_DataTiling, CPU_TppXsmm, LLVMGPU_SimpleDistribute,
-            LLVMGPU_Vectorize, LLVMGPU_MatmulSimt, LLVMGPU_MatmulTensorCore,
-            LLVMGPU_TransposeSharedMem, LLVMGPU_WarpReduction,
-            LLVMGPU_PackUnPack, LLVMGPU_MatmulTensorCoreMmaSync,
-            SPIRV_BaseDistribute, SPIRV_BaseVectorize,
-            SPIRV_MatmulPromoteVectorize, SPIRV_CooperativeMatrixVectorize,
-            SPIRV_SubgroupReduce, SPIRV_WinogradVectorize, VMVX_Default,
-            // Transform dialect based codegen
-            Linalg_TransformDialectCodegen, None
-          ]> {
+    : I32EnumAttr<"DispatchLoweringPassPipeline",
+                  "identifier for pass pipeline use to lower dispatch region", [
+                    CPU_Default, CPU_DoubleTilingExpert,
+                    CPU_DoubleTilingPadExpert, CPU_DoubleTilingPeelingExpert,
+                    CPU_ConvTileAndDecomposeExpert, CPU_Mmt4dTilingExpert,
+                    CPU_BufferOpsTileAndVectorize, CPU_TripleTilingExpert,
+                    CPU_DataTiling, LLVMGPU_SimpleDistribute,
+                    CPU_TppXsmm,
+                    LLVMGPU_Vectorize, LLVMGPU_MatmulSimt, LLVMGPU_MatmulTensorCore,
+                    LLVMGPU_TransposeSharedMem, LLVMGPU_WarpReduction,
+                    SPIRV_BaseDistribute, SPIRV_BaseVectorize,
+                    SPIRV_MatmulPromoteVectorize, SPIRV_CooperativeMatrixVectorize,
+                    SPIRV_SubgroupReduce, SPIRV_WinogradVectorize,
+                    VMVX_Default,
+                    // Transform dialect based codegen
+                    Linalg_TransformDialectCodegen,
+                    None
+                  ]> {
   let cppNamespace = "::mlir::iree_compiler::IREE::Codegen";
   // Don't generate a C++ class! We want to use the AttrDef
   let genSpecializedAttr = 0;

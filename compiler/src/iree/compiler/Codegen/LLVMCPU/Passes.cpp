@@ -607,33 +607,7 @@ void addCPUDataTilingPipeline(OpPassManager &passManager) {
 
 void addCPUTppXsmmPassPipeline(OpPassManager &passManager) {
   OpPassManager &nestedModulePM = passManager.nest<ModuleOp>();
-  //nestedModulePM.addNestedPass<func::FuncOp>(
-  //    createConvertToDestinationPassingStylePass());
-  passManager.addPass(createTileAndDistributeToWorkgroupsPass());
-
-  // This is IREE's function for bufferization.
   addBufferizePasses(nestedModulePM);
-  
-  #if 0
-  // ----------------- TPP bufferization passes: code taken from TPP repo
-  // Currently, fails because createOneShotBufferizePass is a module-level pass.
-  // Run bufferization as the rest of the passes prefer working on memref.
-  bufferization::OneShotBufferizationOptions buffOpts;
-  buffOpts.allowReturnAllocs = true;
-  buffOpts.bufferizeFunctionBoundaries = true;
-  buffOpts.functionBoundaryTypeConversion =
-      bufferization::LayoutMapOption::IdentityLayoutMap;
-  nestedModulePM.addNestedPass<func::FuncOp>(bufferization::createOneShotBufferizePass(buffOpts));
-  nestedModulePM.addNestedPass<func::FuncOp>(bufferization::createDropEquivalentBufferResultsPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      bufferization::createFinalizingBufferizePass());
-  // Clean up after bufferization.
-  nestedModulePM.addNestedPass<func::FuncOp>(bufferization::createBufferDeallocationPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-  #endif
-
-  // Run bufferization as the rest of the passes prefer working on memref.
-  //nestedModulePM.addNestedPass<func::FuncOp>(tpp::createBufferizePass());
 
   //--------------------------------------------------------------------
   //     TPP generation passes
@@ -722,6 +696,26 @@ static void addLowerToLLVMPasses(OpPassManager &passManager) {
   if (clCheckIRBeforeLLVMConversion) {
     passManager.addPass(createLLVMCPUCheckIRBeforeLLVMConversionPass());
   }
+
+  #if 0
+  // -------------------------------------------------------------------
+  // TPP lowering passes
+  // -------------------------------------------------------------------
+  // Lower all TPP ops
+  passManager.addNestedPass<func::FuncOp>(tpp::createConvertTppToXsmmPass());
+  // Lower all LinalgX ops.
+  //passManager.addPass(tpp::createLinalgXToLoopsPass());
+  // Postprocess generated loops.
+  // Perform LICM before function calls are generated to ensure that ops which
+  // map directly to functions also get moved outside of loops, if possible.
+  // This approach assumes that the function calls do not have any side
+  // effects and can be safely moved outside of loop body.
+  passManager.addPass(createLoopInvariantCodeMotionPass());
+  //passManager.addPass(createParallelLoopFusionPass());
+  // Lower all XSMM ops.
+  passManager.addPass(tpp::createConvertXsmmToFuncPass());
+  // -------------------------------------------------------------------
+  #endif
 
   // SCF -> CF
   passManager.addNestedPass<func::FuncOp>(createConvertSCFToCFPass());
