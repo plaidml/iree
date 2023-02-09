@@ -36,6 +36,9 @@
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
 
+#include "TPP/Dialect/Tpp/TppDialect.h"
+#include "TPP/Dialect/Xsmm/XsmmDialect.h"
+
 #define DEBUG_TYPE "iree-llvm-cpu-target"
 
 namespace mlir {
@@ -135,6 +138,8 @@ class LLVMCPUTargetBackend final : public TargetBackend {
                     mlir::transform::TransformDialect,
                     pdl::PDLDialect,
                     pdl_interp::PDLInterpDialect,
+                    tpp::TppDialect,
+                    xsmm::XsmmDialect,
                     arm_neon::ArmNeonDialect>();
     // clang-format on
   }
