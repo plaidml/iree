@@ -87,6 +87,11 @@ static llvm::cl::opt<bool> enableTppLoweringPipeline(
     llvm::cl::desc("enable TPP based lowering passes for matmul and convolution kernels"),
     llvm::cl::init(false));
 
+static llvm::cl::opt<bool> enableTppLoweringPipeline(
+    "iree-llvmcpu-enable-tpp-lowering-pipeline",
+    llvm::cl::desc("enable TPP based lowering passes for matmul and convolution kernels"),
+    llvm::cl::init(false));
+
 // Non-static options are used in other places.
 llvm::cl::opt<std::string> clCPUCodegenTransformDialectFileName(
     "iree-codegen-llvmcpu-use-transform-dialect",
@@ -783,10 +788,7 @@ static LogicalResult setMatmulPadRootConfig(
 
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, op, tileSizes,
-      //DispatchLoweringPassPipeline::CPUDoubleTilingPadExpert);
-      // This is a hack currently.
-      // We need to define proper RootConfig function to invoke our Tpp->Xsmm->func lowering pipeline.
-      DispatchLoweringPassPipeline::CPUTppXsmm);
+      DispatchLoweringPassPipeline::CPUDoubleTilingPadExpert);
 }
 
 static DispatchLoweringPassPipeline getNoPadTilingExpert(
