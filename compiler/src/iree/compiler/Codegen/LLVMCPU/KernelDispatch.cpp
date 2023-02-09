@@ -82,6 +82,11 @@ static llvm::cl::opt<bool> enableVectorPeeling(
     "iree-codegen-enable-vector-peeling",
     llvm::cl::desc("Enable peeling for vectorization"), llvm::cl::init(true));
 
+static llvm::cl::opt<bool> enableTppLoweringPipeline(
+    "iree-llvmcpu-enable-tpp-lowering-pipeline",
+    llvm::cl::desc("enable TPP based lowering passes for matmul and convolution kernels"),
+    llvm::cl::init(false));
+
 // Non-static options are used in other places.
 llvm::cl::opt<std::string> clCPUCodegenTransformDialectFileName(
     "iree-codegen-llvmcpu-use-transform-dialect",
@@ -778,10 +783,7 @@ static LogicalResult setMatmulPadRootConfig(
 
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, op, tileSizes,
-      //DispatchLoweringPassPipeline::CPUDoubleTilingPadExpert);
-      // This is a hack currently.
-      // We need to define proper RootConfig function to invoke our Tpp->Xsmm->func lowering pipeline.
-      DispatchLoweringPassPipeline::CPUTppXsmm);
+      DispatchLoweringPassPipeline::CPUDoubleTilingPadExpert);
 }
 
 static DispatchLoweringPassPipeline getNoPadTilingExpert(
@@ -945,6 +947,16 @@ static SmallVector<int64_t> getMatmulWorkgroupSizes(func::FuncOp entryPointFn,
   LLVM_DEBUG(KD_DBGS() << "Matmul workgroup sizes: " << tileSizes << "\n");
 
   return tileSizes;
+}
+
+/// Sets the TPP based lowering configuration for dispatch region with root op
+/// that implements the contraction operation interface
+static LogicalResult setTppRootConfig(
+  func::FuncOp entryPointFn, linalg::ContractionOpInterface contractionOp) {
+  auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
+      entryPointFn.getContext(),
+      DispatchLoweringPassPipeline::CPUTppXsmm);
+  return setTranslationInfo(entryPointFn, translationInfo);
 }
 
 /// Sets the lowering configuration for dispatch region with root op that
@@ -1793,7 +1805,11 @@ static LogicalResult setRootConfigImpl(
         .Case<tensor::UnPackOp>(
             [&](auto op) { return setUnPackOpRootConfig(entryPointFn, op); })
         .Case<linalg::ContractionOpInterface>(
-            [&](auto op) { return setRootConfig(entryPointFn, op); })
+            [&](auto op) {
+              if (enableTppLoweringPipeline)
+                return setTppRootConfig(entryPointFn, op);
+              else
+                return setRootConfig(entryPointFn, op); })
         .Case<linalg::LinalgOp>(
             [&](auto op) { return setRootConfig(entryPointFn, op); })
         .Case<TilingInterface>(
