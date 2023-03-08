@@ -24,6 +24,9 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
+#include "mlir/Dialect/Bufferization/Transforms/Transforms.h"
 #include "TPP/Passes.h"
 
 #define DEBUG_TYPE "iree-llvm-cpu-lowering-pass-pipeline"
@@ -688,7 +691,29 @@ void addCPUDataTilingPipeline(OpPassManager &passManager) {
 
 void addCPUTppXsmmPassPipeline(OpPassManager &passManager) {
   OpPassManager &nestedModulePM = passManager.nest<ModuleOp>();
+  // This is IREE's function for bufferization.
   addBufferizePasses(nestedModulePM);
+  
+  #if 0
+  // ----------------- TPP bufferization passes: code taken from TPP repo
+  // Currently, fails because createOneShotBufferizePass is a module-level pass.
+  // Run bufferization as the rest of the passes prefer working on memref.
+  bufferization::OneShotBufferizationOptions buffOpts;
+  buffOpts.allowReturnAllocs = true;
+  buffOpts.bufferizeFunctionBoundaries = true;
+  buffOpts.functionBoundaryTypeConversion =
+      bufferization::LayoutMapOption::IdentityLayoutMap;
+  nestedModulePM.addNestedPass<func::FuncOp>(bufferization::createOneShotBufferizePass(buffOpts));
+  nestedModulePM.addNestedPass<func::FuncOp>(bufferization::createDropEquivalentBufferResultsPass());
+  nestedModulePM.addNestedPass<func::FuncOp>(
+      bufferization::createFinalizingBufferizePass());
+  // Clean up after bufferization.
+  nestedModulePM.addNestedPass<func::FuncOp>(bufferization::createBufferDeallocationPass());
+  nestedModulePM.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  #endif
+
+  // Run bufferization as the rest of the passes prefer working on memref.
+  //nestedModulePM.addNestedPass<func::FuncOp>(tpp::createBufferizePass());
 
   //--------------------------------------------------------------------
   //     TPP generation passes
