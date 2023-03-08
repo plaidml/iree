@@ -24,12 +24,9 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
-<<<<<<< HEAD
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Transforms.h"
-=======
->>>>>>> e5a848fa6 (Working integration of LinalgToTpp and TppToXsmm passes as DispatchLoweringPipeline)
 #include "TPP/Passes.h"
 
 #define DEBUG_TYPE "iree-llvm-cpu-lowering-pass-pipeline"
