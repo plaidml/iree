@@ -24,6 +24,9 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
+#include "mlir/Dialect/Bufferization/Transforms/Transforms.h"
 #include "TPP/Passes.h"
 
 #define DEBUG_TYPE "iree-llvm-cpu-lowering-pass-pipeline"
