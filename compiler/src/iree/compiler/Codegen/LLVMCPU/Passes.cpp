@@ -720,6 +720,10 @@ void addCPUDataTilingPipeline(OpPassManager &passManager) {
 
 void addCPUTppXsmmPassPipeline(OpPassManager &passManager) {
   OpPassManager &nestedModulePM = passManager.nest<ModuleOp>();
+  //nestedModulePM.addNestedPass<func::FuncOp>(
+  //    createConvertToDestinationPassingStylePass());
+  passManager.addPass(createTileAndDistributeToWorkgroupsPass());
+
   // This is IREE's function for bufferization.
   addBufferizePasses(nestedModulePM);
   
@@ -794,6 +798,9 @@ void addTransformDialectPasses(OpPassManager &passManager) {
 }
 
 static void addLowerToLLVMPasses(OpPassManager &passManager) {
+  // Lower XSMM calls to functions.
+  passManager.addPass(tpp::createConvertXsmmToFuncPass());
+
   // LinalgExt -> SCF
   passManager.addNestedPass<func::FuncOp>(
       IREE::LinalgExt::createLinalgExtToLoopsPass());
@@ -821,26 +828,6 @@ static void addLowerToLLVMPasses(OpPassManager &passManager) {
   if (clCheckIRBeforeLLVMConversion && !clEnableHoistPadding) {
     passManager.addPass(createLLVMCPUCheckIRBeforeLLVMConversionPass());
   }
-
-  #if 0
-  // -------------------------------------------------------------------
-  // TPP lowering passes
-  // -------------------------------------------------------------------
-  // Lower all TPP ops
-  passManager.addNestedPass<func::FuncOp>(tpp::createConvertTppToXsmmPass());
-  // Lower all LinalgX ops.
-  //passManager.addPass(tpp::createLinalgXToLoopsPass());
-  // Postprocess generated loops.
-  // Perform LICM before function calls are generated to ensure that ops which
-  // map directly to functions also get moved outside of loops, if possible.
-  // This approach assumes that the function calls do not have any side
-  // effects and can be safely moved outside of loop body.
-  passManager.addPass(createLoopInvariantCodeMotionPass());
-  //passManager.addPass(createParallelLoopFusionPass());
-  // Lower all XSMM ops.
-  passManager.addPass(tpp::createConvertXsmmToFuncPass());
-  // -------------------------------------------------------------------
-  #endif
 
   // SCF -> CF
   passManager.addNestedPass<func::FuncOp>(createConvertSCFToCFPass());
