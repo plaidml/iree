@@ -86,6 +86,7 @@ iree_cc_library(
     iree::base::internal
     iree::base::tracing
     iree::hal
+    ${IREE_HAL_EXECUTABLE_LOADER_EXTRA_DEPS}
   PUBLIC
 )
 
