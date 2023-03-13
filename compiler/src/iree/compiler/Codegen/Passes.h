@@ -408,6 +408,10 @@ void addMmt4dTilingExpertPassPipeline(OpPassManager &passManager,
 /// and then to XSMM function calls.
 void addCPUTppXsmmPassPipeline(OpPassManager &passManager);
 
+/// Populates the passes needed to lower linalg ops on tensors to TPP ops
+/// and then to XSMM function calls.
+void addCPUTppXsmmPassPipeline(OpPassManager &passManager);
+
 //----------------------------------------------------------------------------//
 // LLVMCPU Pass Pipelines for lowering to LLVM dialect.
 //----------------------------------------------------------------------------//
