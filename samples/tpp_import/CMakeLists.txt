@@ -13,5 +13,4 @@ target_sources(${_IMPORTS_NAME}
 target_link_libraries(${_IMPORTS_NAME}
   tpp_c_runner_utils
   iree_base_base
-  iree_hal_local_executable_loader
 )
