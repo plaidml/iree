@@ -114,15 +114,14 @@ option(IREE_COMPILER_BUILD_SHARED_LIBS "Enables BUILD_SHARED_LIBS CMake mode for
 # CI coverage is established.
 option(BUILD_SHARED_LIBS "Instructs CMake to build libraries as shared if possible" OFF)
 
-# Build IREE with TPP-MLIR repository
-option(IREE_BUILD_EXPERIMENTAL_TPP "Builds experimental TPP passes." OFF)
-
 #-------------------------------------------------------------------------------
 # Experimental project flags
 #-------------------------------------------------------------------------------
 
 option(IREE_BUILD_EXPERIMENTAL_VMVX_MMT4D "Enables MMT4D methods in the VMVX module." OFF)
 option(IREE_BUILD_EXPERIMENTAL_WEB_SAMPLES "Builds experimental web samples." OFF)
+# Build IREE with TPP-MLIR repository
+option(IREE_BUILD_EXPERIMENTAL_TPP "Builds experimental TPP passes." OFF)
 
 #-------------------------------------------------------------------------------
 # CUDA Toolkit.
