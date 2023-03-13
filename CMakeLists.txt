@@ -728,7 +728,7 @@ else()
   if(IREE_BUILD_EXPERIMENTAL_TPP)
     # This is temporary to tell tpp-mlir it's been built inside IREE
     set(TPP_INSIDE_IREE ON CACHE BOOL "" FORCE)
-    iree_add_llvm_external_project(mlir-tpp-dialects MLIR_TPP_DIALECTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tpp-mlir)
+    iree_llvm_add_external_project(mlir-tpp-dialects ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tpp-mlir)
   endif()
 
   # Ensure that LLVM-based dependencies needed for testing are included.
