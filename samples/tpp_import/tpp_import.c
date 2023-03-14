@@ -11,14 +11,14 @@
 
 extern int iree_xsmm_brgemm_dispatch_f32(void* context, void* params,
                                          void* reserved);
-extern int iree_xsmm_matmul_dispatch_f32(void* context, void* params,
+extern int iree_xsmm_matmul_dispatch(void* context, void* params,
                                          void* reserved);
 extern int iree_xsmm_unary_dispatch(void* context, void* params,
                                     void* reserved);
 
 extern int iree_xsmm_brgemm_invoke_f32(void* context, void* params,
                                        void* reserved);
-extern int iree_xsmm_matmul_invoke_f32(void* context, void* params,
+extern int iree_xsmm_matmul_invoke(void* context, void* params,
                                        void* reserved);
 extern int iree_xsmm_unary_invoke(void* context, void* params, void* reserved);
 
@@ -32,8 +32,8 @@ static iree_status_t iree_samples_tpp_import_provider_resolve(
     return iree_ok_status();
   }
   if (iree_string_view_equal(symbol_name,
-                             IREE_SV("xsmm_matmul_dispatch_f32"))) {
-    *out_fn_ptr = iree_xsmm_matmul_dispatch_f32;
+                             IREE_SV("xsmm_matmul_dispatch"))) {
+    *out_fn_ptr = iree_xsmm_matmul_dispatch;
     return iree_ok_status();
   }
   if (iree_string_view_equal(symbol_name, IREE_SV("xsmm_unary_dispatch"))) {
@@ -46,8 +46,8 @@ static iree_status_t iree_samples_tpp_import_provider_resolve(
     *out_fn_ptr = iree_xsmm_brgemm_invoke_f32;
     return iree_ok_status();
   }
-  if (iree_string_view_equal(symbol_name, IREE_SV("xsmm_matmul_invoke_f32"))) {
-    *out_fn_ptr = iree_xsmm_matmul_invoke_f32;
+  if (iree_string_view_equal(symbol_name, IREE_SV("xsmm_matmul_invoke"))) {
+    *out_fn_ptr = iree_xsmm_matmul_invoke;
     return iree_ok_status();
   }
   if (iree_string_view_equal(symbol_name, IREE_SV("xsmm_unary_invoke"))) {
