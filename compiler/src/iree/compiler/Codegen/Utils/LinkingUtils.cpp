@@ -105,8 +105,19 @@ static LogicalResult mergeModuleInto(
             // conflicting symbol names. We think such conflicts will be better
             // fixed in other ways, so we'll emit an error until we find a case
             // where that isn't true.
-            return op->emitError()
+            //
+            // This is a temporary workaround to handle external functions (xsmm_invoke,..)
+            // that are duplicate. IREE invokes our passes for every dispatch region,
+            // leading to creation of these duplicate declarations.
+            if (OperationEquivalence::isEquivalentTo(
+                  targetOp, op, OperationEquivalence::exactValueMatch,
+                  /*markEquivalent=*/nullptr,
+                  OperationEquivalence::Flags::IgnoreLocations)) {
+              continue;
+            } else {
+              return op->emitError()
                    << "multiple public symbols with the name: " << symbolName;
+            }
           } else {
             // Keep the original name for our new op, rename the target op.
             renameWithDisambiguatedName(targetOp, targetModuleOp,
