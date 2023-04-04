@@ -102,6 +102,11 @@ static llvm::cl::opt<bool> enableTppLoweringPipeline(
     llvm::cl::desc("enable TPP based lowering passes for matmul and convolution kernels"),
     llvm::cl::init(false));
 
+static llvm::cl::opt<bool> enableTppLoweringPipeline(
+    "iree-llvmcpu-enable-tpp-lowering-pipeline",
+    llvm::cl::desc("enable TPP based lowering passes for matmul and convolution kernels"),
+    llvm::cl::init(false));
+
 // Non-static options are used in other places.
 llvm::cl::opt<std::string> clCPUCodegenTransformDialectFileName(
     "iree-codegen-llvmcpu-use-transform-dialect",
