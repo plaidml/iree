@@ -953,10 +953,19 @@ static SmallVector<int64_t> getMatmulWorkgroupSizes(func::FuncOp entryPointFn,
 /// that implements the contraction operation interface
 static LogicalResult setTppRootConfig(
   func::FuncOp entryPointFn, linalg::ContractionOpInterface contractionOp) {
+  
+  SmallVector<int64_t> defaultTileSizes = {1};
+  TileSizesListType tileSizesList = {defaultTileSizes};
+  return setOpConfigAndEntryPointFnTranslation(
+      entryPointFn, contractionOp, tileSizesList,
+      DispatchLoweringPassPipeline::CPUTppXsmm);
+
+  #if 0
   auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
       entryPointFn.getContext(),
       DispatchLoweringPassPipeline::CPUTppXsmm);
   return setTranslationInfo(entryPointFn, translationInfo);
+  #endif
 }
 
 /// Sets the lowering configuration for dispatch region with root op that
