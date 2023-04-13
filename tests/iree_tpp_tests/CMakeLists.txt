@@ -18,6 +18,7 @@ iree_lit_test_suite(
     "mlp.mlir"
     "matmul.mlir"
     "iree_mobilenet.mlir"
+    "iree_bert.mlir"
   TOOLS
     ${IREE_LLD_TARGET}
     FileCheck
