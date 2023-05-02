@@ -810,8 +810,6 @@ else()
     iree_llvm_add_external_project(mlir-tpp-dialects ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tpp-mlir)
   endif()
 
-  add_subdirectory("third_party/llvm-project/llvm" EXCLUDE_FROM_ALL)
-
   # Ensure that LLVM-based dependencies needed for testing are included.
   add_dependencies(iree-test-deps FileCheck)
   if(IREE_LLD_TARGET)
