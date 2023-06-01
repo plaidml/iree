@@ -110,12 +110,12 @@ static LogicalResult mergeModuleInto(
             // leading to creation of these duplicate declarations.
             // TODO(nhasabni): Check if this is needed.
             if (OperationEquivalence::isEquivalentTo(
-                  targetOp, op, OperationEquivalence::exactValueMatch,
+                  targetOp, sourceOp, OperationEquivalence::exactValueMatch,
                   /*markEquivalent=*/nullptr,
                   OperationEquivalence::Flags::IgnoreLocations)) {
               continue;
             } else {
-              return op->emitError()
+              return sourceOp->emitError()
                    << "multiple public symbols with the name: " << symbolName;
             }
           } else {

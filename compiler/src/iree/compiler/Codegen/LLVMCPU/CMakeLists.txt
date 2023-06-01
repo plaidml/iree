@@ -48,6 +48,7 @@ iree_cc_library(
     "VerifyLinalgTransformLegality.cpp"
   DEPS
     MLIRTPP
+    xsmm
     IREELinalgExtDialect
     IREELinalgExtPasses
     IREELinalgTransformDialect

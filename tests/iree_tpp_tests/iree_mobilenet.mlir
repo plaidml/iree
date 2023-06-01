@@ -4,6 +4,7 @@
 // RUN: --iree-llvmcpu-stack-allocation-limit=4816897
 
 // RUN: iree-run-module --device=local-task --module=%s.vmfb \
+// RUN: --executable_plugin=${IREE_BINARY_DIR}/samples/tpp_import/tpp_import_x86_64.so \
 // RUN: --function=predict --task_worker_stack_size=481689700 \
 // RUN: --input="1x224x224x3xf32=1" | \
 // RUN: FileCheck %s

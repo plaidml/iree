@@ -94,11 +94,6 @@ static llvm::cl::opt<bool> enableTppLoweringPipeline(
     llvm::cl::desc("enable TPP based lowering passes for matmul and convolution kernels"),
     llvm::cl::init(false));
 
-static llvm::cl::opt<bool> enableTppLoweringPipeline(
-    "iree-llvmcpu-enable-tpp-lowering-pipeline",
-    llvm::cl::desc("enable TPP based lowering passes for matmul and convolution kernels"),
-    llvm::cl::init(false));
-
 // Non-static options are used in other places.
 llvm::cl::opt<std::string> clCPUCodegenTransformDialectFileName(
     "iree-codegen-llvmcpu-use-transform-dialect",
@@ -989,10 +984,12 @@ static SmallVector<int64_t> getMatmulWorkgroupSizes(func::FuncOp entryPointFn,
 /// that implements the contraction operation interface
 static LogicalResult setTppRootConfig(
   func::FuncOp entryPointFn, linalg::ContractionOpInterface contractionOp) {
-  auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
-      entryPointFn.getContext(),
+  SmallVector<int64_t> tileSizes(0, 1);
+  TileSizesListType tileSizesList = {tileSizes};
+
+  return setOpConfigAndEntryPointFnTranslation(
+      entryPointFn, contractionOp, tileSizesList,
       DispatchLoweringPassPipeline::CPUTppXsmm);
-  return setTranslationInfo(entryPointFn, translationInfo);
 }
 
 /// Sets the lowering configuration for dispatch region with root op that
